@@ -3,7 +3,7 @@
 ;; Author: llm-openai-responses contributors
 ;; Maintainer: llm-openai-responses contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (llm "0") (llm-openai "0"))
+;; Package-Requires: ((emacs "29.1") (llm "0"))
 ;; Keywords: ai, llm
 ;; URL: https://github.com/fitzgibbon/llm-openai-responses
 ;; SPDX-License-Identifier: GPL-3.0-or-later
