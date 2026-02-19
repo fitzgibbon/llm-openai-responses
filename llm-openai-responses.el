@@ -41,6 +41,7 @@ requests a summary string mode (for example \"auto\")."
 (defun llm-openai-responses--coerce-string (v)
   "Return V as a string when possible, otherwise nil." 
   (cond
+   ((null v) nil)
    ((stringp v) v)
    ((symbolp v) (symbol-name v))
    (t nil)))
