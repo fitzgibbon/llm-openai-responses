@@ -24,7 +24,68 @@
 (require 'llm-provider-utils)
 
 (cl-defstruct (llm-openai-responses (:include llm-openai))
-  "OpenAI provider that uses the /v1/responses API for chat calls.")
+  "OpenAI provider that uses the /v1/responses API for chat calls.
+
+REASONING-SUMMARY controls whether the Responses API should return
+reasoning summaries.  nil leaves provider defaults unchanged.  Non-nil
+requests a summary string mode (for example \"auto\")."
+  reasoning-summary)
+
+(defun llm-openai-responses--as-list (v)
+  "Return V as a list when V is a vector or list." 
+  (cond
+   ((vectorp v) (append v nil))
+   ((listp v) v)
+   (t nil)))
+
+(defun llm-openai-responses--coerce-string (v)
+  "Return V as a string when possible, otherwise nil." 
+  (cond
+   ((stringp v) v)
+   ((symbolp v) (symbol-name v))
+   (t nil)))
+
+(defun llm-openai-responses--build-reasoning-request (provider prompt)
+  "Build :reasoning request payload from PROVIDER and PROMPT." 
+  (let* ((reasoning (llm-chat-prompt-reasoning prompt))
+         (effort (pcase reasoning
+                   ('light "low")
+                   ('medium "medium")
+                   ('maximum "high")
+                   (_ nil)))
+         (summary-mode (llm-openai-responses--coerce-string
+                        (llm-openai-responses-reasoning-summary provider)))
+         (payload nil))
+    (when effort
+      (setq payload (plist-put payload :effort effort)))
+    (when summary-mode
+      (setq payload (plist-put payload :summary summary-mode)))
+    payload))
+
+(defun llm-openai-responses--extract-reasoning (response)
+  "Extract reasoning summary text from Responses API RESPONSE." 
+  (let (parts)
+    (dolist (item (llm-openai-responses--as-list (assoc-default 'output response)))
+      (when (equal (assoc-default 'type item) "reasoning")
+        (let ((summary (assoc-default 'summary item))
+              (text (assoc-default 'text item)))
+          (when (stringp text)
+            (push text parts))
+          (cond
+           ((stringp summary)
+            (push summary parts))
+           (t
+            (dolist (entry (llm-openai-responses--as-list summary))
+              (cond
+               ((stringp entry)
+                (push entry parts))
+               ((listp entry)
+                (when-let ((entry-text (or (assoc-default 'text entry)
+                                           (assoc-default 'summary_text entry))))
+                  (push (format "%s" entry-text) parts))))))))))
+    (let ((joined (string-trim (string-join (nreverse parts) "\n"))))
+      (unless (string-empty-p joined)
+        joined))))
 
 (defun llm-openai-responses--tool-spec (tool)
   "Convert llm TOOL spec to Responses API function-tool shape." 
@@ -118,6 +179,8 @@ completions framing, not Responses events."
   (llm-provider-utils-combine-to-system-prompt prompt llm-openai-example-prelude)
   (let ((request (list :model (llm-openai-chat-model provider)
                        :input (vconcat (llm-openai-responses--build-input prompt)))))
+    (when-let ((reasoning-opts (llm-openai-responses--build-reasoning-request provider prompt)))
+      (setq request (plist-put request :reasoning reasoning-opts)))
     (when (llm-chat-prompt-max-tokens prompt)
       (setq request
             (plist-put request :max_output_tokens (llm-chat-prompt-max-tokens prompt))))
@@ -175,6 +238,10 @@ completions framing, not Responses events."
                        (if (or (null args) (string-empty-p args)) "{}" args))
                      :object-type 'alist))))
          (append (assoc-default 'output response) nil))))
+
+(cl-defmethod llm-provider-extract-reasoning ((_ llm-openai-responses) response)
+  "Extract reasoning summary text from Responses API RESPONSE." 
+  (llm-openai-responses--extract-reasoning response))
 
 (cl-defmethod llm-provider-populate-tool-uses ((_ llm-openai-responses) prompt tool-uses)
   "Populate PROMPT with TOOL-USES as assistant tool calls." 
