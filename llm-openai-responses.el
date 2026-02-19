@@ -87,6 +87,18 @@ requests a summary string mode (for example \"auto\")."
       (unless (string-empty-p joined)
         joined))))
 
+(defun llm-openai-responses--parse-tool-args (args)
+  "Parse function-call ARGS JSON into an alist.
+
+Responses API occasionally emits non-object JSON (for example `true').
+Return an empty alist in that case so llm.el can raise a normal
+missing-argument error instead of a low-level type error."
+  (let* ((raw (if (or (null args) (string-empty-p args)) "{}" args))
+         (parsed (json-parse-string raw :object-type 'alist)))
+    (if (listp parsed)
+        parsed
+      nil)))
+
 (defun llm-openai-responses--tool-spec (tool)
   "Convert llm TOOL spec to Responses API function-tool shape." 
   (let ((spec (llm-provider-utils-openai-tool-spec tool)))
@@ -233,10 +245,8 @@ completions framing, not Responses events."
               :id (or (assoc-default 'call_id item)
                       (assoc-default 'id item))
               :name (assoc-default 'name item)
-              :args (json-parse-string
-                     (let ((args (assoc-default 'arguments item)))
-                       (if (or (null args) (string-empty-p args)) "{}" args))
-                     :object-type 'alist))))
+              :args (llm-openai-responses--parse-tool-args
+                     (assoc-default 'arguments item)))))
          (append (assoc-default 'output response) nil))))
 
 (cl-defmethod llm-provider-extract-reasoning ((_ llm-openai-responses) response)
