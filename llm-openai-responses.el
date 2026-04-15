@@ -256,11 +256,15 @@ partials instead of being appended again."
               json-response model-list image-input))
 
 (cl-defmethod llm-provider-chat-request ((provider llm-openai-responses) prompt streaming)
-  "Build Responses API request plist from PROMPT for PROVIDER." 
+  "Build Responses API request plist from PROMPT for PROVIDER.
+
+Use `:false' for non-streaming requests so `json-serialize' on Emacs 30
+produces a valid JSON `false` literal.  `:json-false' is returned by
+`json-parse-*', but it is not accepted as input by `json-serialize'." 
   (llm-provider-utils-combine-to-system-prompt prompt llm-openai-example-prelude)
   (let ((request (list :model (llm-openai-chat-model provider)
                        :input (vconcat (llm-openai-responses--build-input prompt))
-                       :stream (if streaming t :json-false))))
+                       :stream (if streaming t :false))))
     (when-let ((reasoning-opts (llm-openai-responses--build-reasoning-request provider prompt)))
       (setq request (plist-put request :reasoning reasoning-opts)))
     (when (llm-chat-prompt-max-tokens prompt)
