@@ -173,25 +173,94 @@ missing-argument error instead of a low-level type error."
                        (or (assoc-default 'text part)
                            (assoc-default 'output_text part))))
                    (append (assoc-default 'content item) nil))))
-              (append (assoc-default 'output response) nil)))
+               (append (assoc-default 'output response) nil)))
        "\n")))
+
+(defun llm-openai-responses--stream-usage-plist (payload)
+  "Extract token accounting plist from streaming PAYLOAD when present."
+  (when-let* ((response (or (assoc-default 'response payload) payload))
+              (usage (assoc-default 'usage response)))
+    (let ((input-tokens (assoc-default 'input_tokens usage))
+          (output-tokens (assoc-default 'output_tokens usage)))
+      (append
+       (when input-tokens (list :input-tokens input-tokens))
+       (when output-tokens (list :output-tokens output-tokens))))))
+
+(defun llm-openai-responses--stream-tool-fragment (output-index item &optional replace-arguments)
+  "Build one streaming tool fragment for OUTPUT-INDEX from ITEM.
+
+When REPLACE-ARGUMENTS is non-nil, ITEM arguments replace earlier streamed
+partials instead of being appended again."
+  (when (equal (assoc-default 'type item) "function_call")
+    (list 'index output-index
+          'id (or (assoc-default 'call_id item)
+                  (assoc-default 'id item))
+          'call-id (assoc-default 'call_id item)
+          'name (assoc-default 'name item)
+          'arguments (or (assoc-default 'arguments item) "")
+          'replace replace-arguments)))
+
+(defun llm-openai-responses--handle-stream-event (payload receiver err-receiver)
+  "Dispatch one streaming event PAYLOAD to RECEIVER or ERR-RECEIVER."
+  (pcase (assoc-default 'type payload)
+    ("response.output_text.delta"
+     (when-let ((delta (assoc-default 'delta payload)))
+       (funcall receiver `(:text ,delta))))
+    ((or "response.reasoning_summary_text.delta"
+         "response.reasoning_text.delta")
+     (when-let ((delta (assoc-default 'delta payload)))
+       (funcall receiver `(:reasoning ,delta))))
+    ("response.output_item.added"
+     (when-let ((fragment (llm-openai-responses--stream-tool-fragment
+                           (assoc-default 'output_index payload)
+                           (assoc-default 'item payload))))
+       (funcall receiver `(:tool-uses-raw ,(vector fragment)))))
+    ("response.function_call_arguments.delta"
+     (funcall receiver
+              `(:tool-uses-raw
+                ,(vector
+                  (list 'index (assoc-default 'output_index payload)
+                        'id (assoc-default 'item_id payload)
+                        'arguments (or (assoc-default 'delta payload) ""))))))
+    ("response.function_call_arguments.done"
+     (when-let ((fragment (llm-openai-responses--stream-tool-fragment
+                           (assoc-default 'output_index payload)
+                           (assoc-default 'item payload)
+                           t)))
+       (funcall receiver `(:tool-uses-raw ,(vector fragment)))))
+    ("response.output_item.done"
+     (when-let ((fragment (llm-openai-responses--stream-tool-fragment
+                           (assoc-default 'output_index payload)
+                           (assoc-default 'item payload)
+                           t)))
+       (funcall receiver `(:tool-uses-raw ,(vector fragment))))
+     (when-let ((usage (llm-openai-responses--stream-usage-plist payload)))
+       (funcall receiver usage)))
+    ("response.completed"
+     (when-let ((usage (llm-openai-responses--stream-usage-plist payload)))
+       (funcall receiver usage)))
+    ((or "response.failed" "error")
+     (funcall err-receiver
+              (or (assoc-default 'message (assoc-default 'error payload))
+                  (assoc-default 'message payload)
+                  "Responses streaming request failed")))
+    (_ nil)))
 
 (cl-defmethod llm-provider-chat-url ((provider llm-openai-responses))
   "Return Responses API URL for PROVIDER chat calls." 
   (llm-openai--url provider "responses"))
 
 (cl-defmethod llm-capabilities ((_ llm-openai-responses))
-  "Return capabilities for this provider.
+  "Return capabilities for this provider." 
+  '(streaming embeddings embeddings-batch tool-use streaming-tool-use
+              json-response model-list image-input))
 
-Streaming is omitted because llm.el's stock OpenAI SSE decoder expects chat
-completions framing, not Responses events." 
-  '(embeddings embeddings-batch tool-use json-response model-list image-input))
-
-(cl-defmethod llm-provider-chat-request ((provider llm-openai-responses) prompt _streaming)
+(cl-defmethod llm-provider-chat-request ((provider llm-openai-responses) prompt streaming)
   "Build Responses API request plist from PROMPT for PROVIDER." 
   (llm-provider-utils-combine-to-system-prompt prompt llm-openai-example-prelude)
   (let ((request (list :model (llm-openai-chat-model provider)
-                       :input (vconcat (llm-openai-responses--build-input prompt)))))
+                       :input (vconcat (llm-openai-responses--build-input prompt))
+                       :stream (if streaming t :json-false))))
     (when-let ((reasoning-opts (llm-openai-responses--build-reasoning-request provider prompt)))
       (setq request (plist-put request :reasoning reasoning-opts)))
     (when (llm-chat-prompt-max-tokens prompt)
@@ -257,6 +326,105 @@ completions framing, not Responses events."
 (cl-defmethod llm-provider-populate-tool-uses ((_ llm-openai-responses) prompt tool-uses)
   "Populate PROMPT with TOOL-USES as assistant tool calls." 
   (llm-provider-utils-append-to-prompt prompt tool-uses nil 'assistant))
+
+(cl-defmethod llm-provider-streaming-media-handler ((_ llm-openai-responses)
+                                                    receiver err-receiver)
+  "Handle Responses API streaming events."
+  (cons 'text/event-stream
+        (plz-event-source:text/event-stream
+         :events `((response.output_text.delta
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.reasoning_summary_text.delta
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.reasoning_text.delta
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.output_item.added
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.output_item.done
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.function_call_arguments.delta
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.function_call_arguments.done
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.completed
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (response.failed
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))
+                   (error
+                    . ,(lambda (event)
+                         (llm-openai-responses--handle-stream-event
+                          (json-parse-string (plz-event-source-event-data event)
+                                             :object-type 'alist)
+                          receiver err-receiver)))))))
+
+(cl-defmethod llm-provider-collect-streaming-tool-uses ((_ llm-openai-responses) data)
+  "Transform Responses streaming DATA fragments into tool-use structs."
+  (let ((tools (make-hash-table :test 'equal))
+        result)
+    (cl-loop for fragment across data do
+             (let* ((index (plist-get fragment 'index))
+                    (tool (or (gethash index tools)
+                              (let ((new-tool (make-llm-provider-utils-tool-use :args "")))
+                                (puthash index new-tool tools)
+                                new-tool)))
+                    (id (or (plist-get fragment 'call-id)
+                            (plist-get fragment 'id)))
+                    (name (plist-get fragment 'name))
+                    (arguments (plist-get fragment 'arguments)))
+               (when id
+                 (setf (llm-provider-utils-tool-use-id tool) id))
+               (when name
+                 (setf (llm-provider-utils-tool-use-name tool) name))
+               (when arguments
+                 (setf (llm-provider-utils-tool-use-args tool)
+                       (if (plist-get fragment 'replace)
+                           arguments
+                         (concat (llm-provider-utils-tool-use-args tool)
+                                 arguments))))))
+    (maphash
+     (lambda (_ tool)
+       (setf (llm-provider-utils-tool-use-args tool)
+             (llm-openai-responses--parse-tool-args
+              (llm-provider-utils-tool-use-args tool)))
+       (push tool result))
+     tools)
+    (nreverse result)))
 
 (provide 'llm-openai-responses)
 
