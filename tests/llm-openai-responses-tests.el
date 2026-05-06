@@ -10,6 +10,15 @@
          (request (llm-provider-chat-request provider prompt t)))
     (should (eq (plist-get request :stream) t))))
 
+(ert-deftest llm-openai-responses-compatible-url-is-used-for-chat ()
+  (let ((provider (make-llm-openai-responses
+                   :url "http://127.0.0.1:11481/v1/"
+                   :key (lambda () "test")
+                   :chat-model "gemma"
+                   :embedding-model "gemma")))
+    (should (equal (llm-provider-chat-url provider)
+                   "http://127.0.0.1:11481/v1/responses"))))
+
 (ert-deftest llm-openai-responses-handle-stream-text-and-usage ()
   (let (events errors)
     (llm-openai-responses--handle-stream-event
