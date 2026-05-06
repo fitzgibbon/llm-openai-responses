@@ -23,7 +23,9 @@
 (require 'llm-openai)
 (require 'llm-provider-utils)
 
-(cl-defstruct (llm-openai-responses (:include llm-openai))
+(cl-defstruct (llm-openai-responses
+               (:include llm-openai-compatible
+                         (url "https://api.openai.com/v1/")))
   "OpenAI provider that uses the /v1/responses API for chat calls.
 
 REASONING-SUMMARY controls whether the Responses API should return
