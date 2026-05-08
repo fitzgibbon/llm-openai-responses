@@ -75,6 +75,12 @@
 (defconst llm-openai-responses-codex-login-timeout-seconds (* 5 60)
   "Wait this long for the Codex OAuth browser callback.")
 
+(defconst llm-openai-responses-codex-login-url-buffer-name "*Codex Login URL*"
+  "Buffer name used to display manual Codex login URLs.")
+
+(defvar llm-openai-responses-codex-login-thread nil
+  "Background thread for the active Codex OAuth login flow.")
+
 (cl-defstruct (llm-openai-responses
                (:include llm-openai-compatible
                          (url llm-openai-responses-default-api-url)))
@@ -604,10 +610,55 @@ called on the main thread with the signaled error object when login fails."
            (llm-openai-responses--persist-oauth2-token provider token)
            (llm-openai-responses--run-on-main-thread success-fn token)
            token)
-       (error
-         (llm-openai-responses--run-on-main-thread error-fn err)
-         nil)))
+        (error
+          (llm-openai-responses--run-on-main-thread error-fn err)
+          nil)))
      "llm-openai-responses-codex-login"))
+
+(defun llm-openai-responses-codex-login-show-url (display-name url)
+  "Copy and display Codex login URL for DISPLAY-NAME."
+  (kill-new url)
+  (when (display-graphic-p)
+    (gui-set-selection 'CLIPBOARD url))
+  (with-current-buffer (get-buffer-create llm-openai-responses-codex-login-url-buffer-name)
+    (erase-buffer)
+    (insert url "\n")
+    (goto-char (point-min))
+    (display-buffer (current-buffer)))
+  (message "Codex login URL copied for %s" display-name))
+
+(defun llm-openai-responses-codex-login-success (display-name _token)
+  "Handle successful Codex login completion for DISPLAY-NAME."
+  (setq llm-openai-responses-codex-login-thread nil)
+  (message "Codex OAuth login ready for %s" display-name))
+
+(defun llm-openai-responses-codex-login-error (display-name err)
+  "Handle failed Codex login completion for DISPLAY-NAME and ERR."
+  (setq llm-openai-responses-codex-login-thread nil)
+  (message "Codex OAuth login failed for %s: %s"
+           display-name
+           (error-message-string err)))
+
+;;;###autoload
+(defun llm-openai-responses-codex-login-start (provider &optional display-name manual-url)
+  "Start Codex OAuth login for PROVIDER and return the worker thread.
+
+DISPLAY-NAME is used in status messages.  When MANUAL-URL is non-nil, copy and
+display the auth URL instead of opening a browser automatically."
+  (let ((display-name (or display-name "Codex OAuth")))
+    (when (and (threadp llm-openai-responses-codex-login-thread)
+               (thread-live-p llm-openai-responses-codex-login-thread))
+      (user-error "A Codex OAuth login is already in progress"))
+    (let ((open-url-fn (if manual-url
+                           (apply-partially #'llm-openai-responses-codex-login-show-url display-name)
+                         #'browse-url))
+          (success-fn (apply-partially #'llm-openai-responses-codex-login-success display-name))
+          (error-fn (apply-partially #'llm-openai-responses-codex-login-error display-name)))
+      (setq llm-openai-responses-codex-login-thread
+            (llm-openai-responses-codex-login-async
+             provider open-url-fn success-fn error-fn))
+      (message "Codex OAuth login started for %s" display-name)
+      llm-openai-responses-codex-login-thread)))
 
 (defun llm-openai-responses--provider-base-url (provider)
   "Return the effective base URL for PROVIDER."

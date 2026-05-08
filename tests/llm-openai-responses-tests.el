@@ -113,8 +113,17 @@
 
 (ert-deftest llm-openai-responses-codex-login-async-calls-success-callback ()
   (let (success-token error-value)
-    (cl-letf (((symbol-function 'llm-openai-responses-codex-login)
-               (lambda (&rest _) 'fake-token)))
+    (cl-letf (((symbol-function 'llm-openai-responses--start-codex-browser-login)
+               (lambda (_provider)
+                 (make-llm-openai-responses-codex-login-session
+                  :provider (make-llm-openai-responses :codex-oauth t :codex-oauth-user-name "test" :chat-model "gpt-5.5")
+                  :auth-url "https://example.test/login")))
+              ((symbol-function 'llm-openai-responses--finish-codex-browser-login)
+               (lambda (_session) (make-oauth2-token :access-response nil)))
+              ((symbol-function 'llm-openai-responses--oauth2-token-account-id)
+               (lambda (_token _provider) "acct_123"))
+              ((symbol-function 'llm-openai-responses--persist-oauth2-token)
+               (lambda (_provider token) token)))
       (let ((thread (llm-openai-responses-codex-login-async
                      'provider nil
                      (lambda (token) (setq success-token token))
@@ -122,13 +131,18 @@
         (thread-join thread)
         (while (and (null success-token) (null error-value))
           (sleep-for 0.01))
-        (should (eq success-token 'fake-token))
+        (should (oauth2-token-p success-token))
         (should (null error-value))))))
 
 (ert-deftest llm-openai-responses-codex-login-async-calls-error-callback ()
   (let (success-token error-value)
-    (cl-letf (((symbol-function 'llm-openai-responses-codex-login)
-               (lambda (&rest _) (signal 'user-error '("boom")))))
+    (cl-letf (((symbol-function 'llm-openai-responses--start-codex-browser-login)
+               (lambda (_provider)
+                 (make-llm-openai-responses-codex-login-session
+                  :provider (make-llm-openai-responses :codex-oauth t :codex-oauth-user-name "test" :chat-model "gpt-5.5")
+                  :auth-url "https://example.test/login")))
+              ((symbol-function 'llm-openai-responses--finish-codex-browser-login)
+               (lambda (_session) (signal 'user-error '("boom")))))
       (let ((thread (llm-openai-responses-codex-login-async
                      'provider nil
                      (lambda (token) (setq success-token token))
@@ -138,3 +152,12 @@
           (sleep-for 0.01))
         (should (null success-token))
         (should (equal (car error-value) 'user-error))))))
+
+(ert-deftest llm-openai-responses-codex-login-start-tracks-thread ()
+  (let ((llm-openai-responses-codex-login-thread nil))
+    (cl-letf (((symbol-function 'llm-openai-responses-codex-login-async)
+               (lambda (_provider _open-url-fn _success-fn _error-fn)
+                 (make-thread (lambda () nil) "llm-openai-responses-test-login"))))
+      (let ((thread (llm-openai-responses-codex-login-start 'provider "Test Provider" t)))
+        (should (threadp thread))
+        (should (eq thread llm-openai-responses-codex-login-thread))))))
