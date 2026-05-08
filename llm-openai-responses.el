@@ -310,12 +310,10 @@ EXPECTED-STATE is compared against the callback state parameter."
 (defun llm-openai-responses--callback-server-port (server)
   "Return the local port for callback SERVER."
   (let ((local (process-contact server :local)))
-    (or (cond
-         ((vectorp local)
-          (and (> (length local) 0)
-               (aref local (1- (length local)))))
-         ((listp local)
-          (car (last local))))
+    (unless (vectorp local)
+      (error "Expected vector network address from process-contact :local, got: %S" local))
+    (or (and (> (length local) 0)
+             (aref local (1- (length local))))
         (process-contact server :service))))
 
 (defun llm-openai-responses--await-callback (server result &optional timeout)
