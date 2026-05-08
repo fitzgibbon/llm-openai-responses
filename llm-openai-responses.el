@@ -303,6 +303,11 @@ provider's persisted session identity is unambiguous."
   "Return first query param NAME from PARAMS."
   (car (alist-get name params nil nil #'string=)))
 
+(defun llm-openai-responses--reply-to-callback-client (proc response)
+  "Send HTTP RESPONSE to callback client PROC and close cleanly."
+  (process-send-string proc response)
+  (process-send-eof proc))
+
 (defun llm-openai-responses--make-callback-filter (result expected-state)
   "Return a process filter that stores callback data into RESULT.
 
@@ -316,50 +321,55 @@ EXPECTED-STATE is compared against the callback state parameter."
                              (match-string 1 request-line)))
                (query (cadr (split-string (or path+query "") "?" t)))
                (params (url-parse-query-string (or query ""))))
-          (cond
-           ((null path+query)
-            (process-send-string proc
-                                 (llm-openai-responses--callback-response
-                                  "400 Bad Request"
-                                  "Sign-in Failed"
-                                  "Missing callback path.")))
+           (cond
+            ((null path+query)
+            (llm-openai-responses--reply-to-callback-client
+             proc
+             (llm-openai-responses--callback-response
+              "400 Bad Request"
+              "Sign-in Failed"
+              "Missing callback path.")))
            ((not (string-prefix-p "/auth/callback" path+query))
-            (process-send-string proc
-                                 (llm-openai-responses--callback-response
-                                  "404 Not Found"
-                                  "Not Found"
-                                  "This endpoint only handles /auth/callback.")))
+            (llm-openai-responses--reply-to-callback-client
+             proc
+             (llm-openai-responses--callback-response
+              "404 Not Found"
+              "Not Found"
+              "This endpoint only handles /auth/callback.")))
            ((not (equal (llm-openai-responses--callback-param params "state") expected-state))
             (setcar result (cons :error "OAuth callback state mismatch"))
-            (process-send-string proc
-                                 (llm-openai-responses--callback-response
-                                  "400 Bad Request"
-                                  "Sign-in Failed"
-                                  "OAuth state mismatch.")))
+            (llm-openai-responses--reply-to-callback-client
+             proc
+             (llm-openai-responses--callback-response
+              "400 Bad Request"
+              "Sign-in Failed"
+              "OAuth state mismatch.")))
            ((llm-openai-responses--callback-param params "error")
             (setcar result (cons :error
                                  (or (llm-openai-responses--callback-param params "error_description")
                                      (llm-openai-responses--callback-param params "error"))))
-            (process-send-string proc
-                                 (llm-openai-responses--callback-response
-                                  "400 Bad Request"
-                                  "Sign-in Failed"
-                                  "The OAuth provider returned an error.")))
+            (llm-openai-responses--reply-to-callback-client
+             proc
+             (llm-openai-responses--callback-response
+              "400 Bad Request"
+              "Sign-in Failed"
+              "The OAuth provider returned an error.")))
            ((llm-openai-responses--callback-param params "code")
             (setcar result (cons :code (llm-openai-responses--callback-param params "code")))
-            (process-send-string proc
-                                 (llm-openai-responses--callback-response
-                                  "200 OK"
-                                  "Sign-in Complete"
-                                  "You can return to Emacs now.")))
+            (llm-openai-responses--reply-to-callback-client
+             proc
+             (llm-openai-responses--callback-response
+              "200 OK"
+              "Sign-in Complete"
+              "You can return to Emacs now.")))
            (t
             (setcar result (cons :error "Missing authorization code"))
-            (process-send-string proc
-                                 (llm-openai-responses--callback-response
-                                  "400 Bad Request"
-                                  "Sign-in Failed"
-                                  "Missing authorization code.")))))
-        (delete-process proc)))))
+            (llm-openai-responses--reply-to-callback-client
+             proc
+             (llm-openai-responses--callback-response
+              "400 Bad Request"
+              "Sign-in Failed"
+              "Missing authorization code.")))))))))
 
 (defun llm-openai-responses--callback-server-port (server)
   "Return the local port for callback SERVER."
@@ -557,20 +567,11 @@ Return the updated auth-data alist on refresh success, otherwise AUTH-DATA."
   "Return a plist with Codex OAuth auth details for PROVIDER."
   (or (llm-openai-responses--oauth2-codex-auth provider)
       (signal 'llm-provider-unconfigured
-              '("No Codex OAuth access token available. Run `M-x llm-openai-responses-codex-login`."))))
+              '("No Codex OAuth access token available. Run `M-x llm-openai-responses-codex-login-start`."))))
 
-;;;###autoload
-(defun llm-openai-responses-codex-login (provider &optional open-url-fn)
-  "Authenticate PROVIDER in the browser and cache it via oauth2.
-
-PROVIDER must be an explicit Codex OAuth-backed `llm-openai-responses'
-provider object with `:codex-oauth-user-name' set.
-
-When OPEN-URL-FN is non-nil, call it with the authorization URL instead of
-opening the browser via `browse-url'."
-  (let* ((session (llm-openai-responses--start-codex-browser-login provider))
-         (_ (funcall (or open-url-fn #'browse-url)
-                     (llm-openai-responses-codex-login-session-auth-url session)))
+(defun llm-openai-responses--complete-codex-login-session (session)
+  "Wait for SESSION callback, exchange tokens, and persist the login."
+  (let* ((provider (llm-openai-responses-codex-login-session-provider session))
          (token (llm-openai-responses--finish-codex-browser-login session))
          (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
     (unless account-id
@@ -579,7 +580,6 @@ opening the browser via `browse-url'."
           (cons (cons 'account_id account-id)
                 (oauth2-token-access-response token)))
     (llm-openai-responses--persist-oauth2-token provider token)
-    (message "Codex OAuth login succeeded for account %s" account-id)
     token))
 
 ;;;###autoload
@@ -599,17 +599,9 @@ called on the main thread with the signaled error object when login fails."
                 (_ (llm-openai-responses--run-on-main-thread
                     (or open-url-fn #'browse-url)
                     (llm-openai-responses-codex-login-session-auth-url session)))
-                (provider (llm-openai-responses-codex-login-session-provider session))
-                (token (llm-openai-responses--finish-codex-browser-login session))
-                (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
-           (unless account-id
-             (user-error "Codex OAuth login succeeded, but no account id was returned"))
-           (setf (oauth2-token-access-response token)
-                 (cons (cons 'account_id account-id)
-                       (oauth2-token-access-response token)))
-           (llm-openai-responses--persist-oauth2-token provider token)
-           (llm-openai-responses--run-on-main-thread success-fn token)
-           token)
+                 (token (llm-openai-responses--complete-codex-login-session session)))
+            (llm-openai-responses--run-on-main-thread success-fn token)
+            token)
         (error
           (llm-openai-responses--run-on-main-thread error-fn err)
           nil)))
