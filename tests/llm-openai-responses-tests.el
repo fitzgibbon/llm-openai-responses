@@ -52,3 +52,15 @@
     (should (equal (llm-provider-utils-tool-use-id tool) "call_1"))
     (should (equal (llm-provider-utils-tool-use-name tool) "lookup"))
     (should (equal (assoc-default 'city (llm-provider-utils-tool-use-args tool)) "Paris"))))
+
+(ert-deftest llm-openai-responses-callback-server-port-supports-vector-contact ()
+  (let ((server (make-network-process :name "llm-openai-responses-test-server"
+                                      :server t
+                                      :host "127.0.0.1"
+                                      :service 0
+                                      :family 'ipv4
+                                      :noquery t)))
+    (unwind-protect
+        (should (integerp (llm-openai-responses--callback-server-port server)))
+      (when (process-live-p server)
+        (delete-process server)))))

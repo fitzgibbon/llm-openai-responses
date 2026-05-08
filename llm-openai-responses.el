@@ -309,8 +309,14 @@ EXPECTED-STATE is compared against the callback state parameter."
 
 (defun llm-openai-responses--callback-server-port (server)
   "Return the local port for callback SERVER."
-  (or (car (last (process-contact server :local)))
-      (process-contact server :service)))
+  (let ((local (process-contact server :local)))
+    (or (cond
+         ((vectorp local)
+          (and (> (length local) 0)
+               (aref local (1- (length local)))))
+         ((listp local)
+          (car (last local))))
+        (process-contact server :service))))
 
 (defun llm-openai-responses--await-callback (server result &optional timeout)
   "Wait for callback SERVER to populate RESULT up to TIMEOUT seconds."
