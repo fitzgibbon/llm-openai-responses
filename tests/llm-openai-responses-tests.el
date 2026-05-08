@@ -1,6 +1,25 @@
 (require 'ert)
 (require 'llm-openai-responses)
 
+(defun llm-openai-responses-tests--http-get (port path)
+  (with-temp-buffer
+    (let ((proc (open-network-stream
+                 "llm-openai-responses-test-client"
+                 (current-buffer)
+                 "127.0.0.1"
+                 port)))
+      (unwind-protect
+          (progn
+            (process-send-string
+             proc
+             (format "GET %s HTTP/1.1\r\nHost: localhost:%s\r\nConnection: close\r\n\r\n"
+                     path port))
+            (process-send-eof proc)
+            (while (accept-process-output proc 0.1))
+            (buffer-string))
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
 (ert-deftest llm-openai-responses-chat-request-enables-streaming ()
   (let* ((provider (make-llm-openai-responses
                     :key (lambda () "test")
@@ -110,6 +129,18 @@
         (delete-process server))
       (when (process-live-p primary)
         (delete-process primary)))))
+
+(ert-deftest llm-openai-responses-callback-server-responds-to-non-callback-path ()
+  (let* ((result (list nil))
+         (server (llm-openai-responses--make-codex-callback-server result "state-123"))
+         (port (llm-openai-responses--callback-server-port server)))
+    (unwind-protect
+        (let ((response (llm-openai-responses-tests--http-get port "/")))
+          (should (string-match-p "404 Not Found" response))
+          (should (string-match-p "This endpoint only handles /auth/callback" response))
+          (should (null (car result))))
+      (when (process-live-p server)
+        (delete-process server)))))
 
 (ert-deftest llm-openai-responses-codex-login-async-calls-success-callback ()
   (let (success-token error-value)

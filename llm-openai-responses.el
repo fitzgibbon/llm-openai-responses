@@ -308,6 +308,14 @@ provider's persisted session identity is unambiguous."
   (process-send-string proc response)
   (process-send-eof proc))
 
+(defun llm-openai-responses--make-callback-log (result expected-state)
+  "Return a server log function for callback RESULT and EXPECTED-STATE."
+  (let ((filter (llm-openai-responses--make-callback-filter result expected-state)))
+    (lambda (_server client _message)
+      (set-process-filter client filter)
+      (set-process-query-on-exit-flag client nil)
+      (process-put client 'payload nil))))
+
 (defun llm-openai-responses--make-callback-filter (result expected-state)
   "Return a process filter that stores callback data into RESULT.
 
@@ -397,7 +405,7 @@ secondary port when the preferred port is already in use."
                  :host "127.0.0.1"
                  :service (car ports)
                  :family 'ipv4
-                 :filter (llm-openai-responses--make-callback-filter result state)
+                 :log (llm-openai-responses--make-callback-log result state)
                  :noquery t))
         (file-error
          (setq ports (cdr ports)))))
@@ -412,7 +420,7 @@ secondary port when the preferred port is already in use."
                      (or timeout llm-openai-responses-codex-login-timeout-seconds))))
     (while (and (null (car result))
                 (< (float-time (current-time)) deadline))
-      (accept-process-output server 1))
+      (accept-process-output nil 1))
     (or (car result)
         (cons :error "Timed out waiting for OAuth callback"))))
 
