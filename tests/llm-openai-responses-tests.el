@@ -110,3 +110,31 @@
         (delete-process server))
       (when (process-live-p primary)
         (delete-process primary)))))
+
+(ert-deftest llm-openai-responses-codex-login-async-calls-success-callback ()
+  (let (success-token error-value)
+    (cl-letf (((symbol-function 'llm-openai-responses-codex-login)
+               (lambda (&rest _) 'fake-token)))
+      (let ((thread (llm-openai-responses-codex-login-async
+                     'provider nil
+                     (lambda (token) (setq success-token token))
+                     (lambda (err) (setq error-value err)))))
+        (thread-join thread)
+        (while (and (null success-token) (null error-value))
+          (sleep-for 0.01))
+        (should (eq success-token 'fake-token))
+        (should (null error-value))))))
+
+(ert-deftest llm-openai-responses-codex-login-async-calls-error-callback ()
+  (let (success-token error-value)
+    (cl-letf (((symbol-function 'llm-openai-responses-codex-login)
+               (lambda (&rest _) (signal 'user-error '("boom")))))
+      (let ((thread (llm-openai-responses-codex-login-async
+                     'provider nil
+                     (lambda (token) (setq success-token token))
+                     (lambda (err) (setq error-value err)))))
+        (thread-join thread)
+        (while (and (null success-token) (null error-value))
+          (sleep-for 0.01))
+        (should (null success-token))
+        (should (equal (car error-value) 'user-error))))))

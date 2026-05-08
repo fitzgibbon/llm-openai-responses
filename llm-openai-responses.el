@@ -404,6 +404,11 @@ secondary port when the preferred port is already in use."
    (oauth2--update-plstore plstore token))
   token)
 
+(defun llm-openai-responses--run-on-main-thread (fn &rest args)
+  "Run FN with ARGS back on the main Emacs thread."
+  (when fn
+    (apply #'run-at-time 0 nil fn args)))
+
 (defun llm-openai-responses--begin-codex-browser-login (provider &optional open-url-fn)
   "Run an interactive browser login for PROVIDER and return an oauth2 token.
 
@@ -536,6 +541,26 @@ opening the browser via `browse-url'."
     (llm-openai-responses--persist-oauth2-token provider token)
     (message "Codex OAuth login succeeded for account %s" account-id)
     token))
+
+;;;###autoload
+(defun llm-openai-responses-codex-login-async
+    (provider &optional open-url-fn success-fn error-fn)
+  "Authenticate PROVIDER asynchronously and return the worker thread.
+
+OPEN-URL-FN is forwarded to `llm-openai-responses-codex-login'.  SUCCESS-FN is
+called on the main thread with the resulting token when login succeeds.
+ERROR-FN is called on the main thread with the signaled error object when login
+fails."
+  (make-thread
+   (lambda ()
+     (condition-case err
+         (let ((token (llm-openai-responses-codex-login provider open-url-fn)))
+           (llm-openai-responses--run-on-main-thread success-fn token)
+           token)
+       (error
+        (llm-openai-responses--run-on-main-thread error-fn err)
+        nil)))
+   "llm-openai-responses-codex-login"))
 
 (defun llm-openai-responses--provider-base-url (provider)
   "Return the effective base URL for PROVIDER."
