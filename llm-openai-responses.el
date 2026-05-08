@@ -404,8 +404,11 @@ secondary port when the preferred port is already in use."
    (oauth2--update-plstore plstore token))
   token)
 
-(defun llm-openai-responses--begin-codex-browser-login (provider)
-  "Run an interactive browser login for PROVIDER and return an oauth2 token."
+(defun llm-openai-responses--begin-codex-browser-login (provider &optional open-url-fn)
+  "Run an interactive browser login for PROVIDER and return an oauth2 token.
+
+When OPEN-URL-FN is non-nil, call it with the OAuth authorization URL instead
+of using `browse-url'."
   (unless (and provider (llm-openai-responses-codex-oauth provider))
     (user-error "Codex browser login requires an explicit Codex OAuth provider"))
   (llm-openai-responses--codex-oauth-user-name provider)
@@ -419,7 +422,7 @@ secondary port when the preferred port is already in use."
                     provider redirect-uri state code-verifier)))
     (unwind-protect
         (progn
-          (browse-url auth-url)
+          (funcall (or open-url-fn #'browse-url) auth-url)
           (pcase-let ((`(,kind . ,value)
                        (llm-openai-responses--await-callback server result 180)))
             (unless (eq kind :code)
@@ -515,12 +518,15 @@ Return the updated auth-data alist on refresh success, otherwise AUTH-DATA."
               '("No Codex OAuth access token available. Run `M-x llm-openai-responses-codex-login`."))))
 
 ;;;###autoload
-(defun llm-openai-responses-codex-login (provider)
+(defun llm-openai-responses-codex-login (provider &optional open-url-fn)
   "Authenticate PROVIDER in the browser and cache it via oauth2.
 
 PROVIDER must be an explicit Codex OAuth-backed `llm-openai-responses'
-provider object with `:codex-oauth-user-name' set."
-  (let* ((token (llm-openai-responses--begin-codex-browser-login provider))
+provider object with `:codex-oauth-user-name' set.
+
+When OPEN-URL-FN is non-nil, call it with the authorization URL instead of
+opening the browser via `browse-url'."
+  (let* ((token (llm-openai-responses--begin-codex-browser-login provider open-url-fn))
          (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
     (unless account-id
       (user-error "Codex OAuth login succeeded, but no account id was returned"))
