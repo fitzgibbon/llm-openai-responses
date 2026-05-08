@@ -2,7 +2,8 @@
 
 ;; Author: llm-openai-responses contributors
 ;; Maintainer: llm-openai-responses contributors
-;; Version: 0.1.0
+;; Package-Version: 0.1.0
+;; Package-Revision: nil
 ;; Package-Requires: ((emacs "29.1") (llm "0") (oauth2 "0.18.4"))
 ;; Keywords: ai, llm
 ;; URL: https://github.com/fitzgibbon/llm-openai-responses
@@ -947,12 +948,12 @@ produces a valid JSON `false` literal.  `:json-false' is returned by
                ('auto "auto")
                ('none "none")
                ('any "required")
-               ((pred stringp) (list :type "function"
-                                     :name (llm-tool-options-tool-choice options)))
-               (_ "auto")))))
+                ((pred stringp) (list :type "function"
+                                      :name (llm-tool-options-tool-choice options)))
+                (_ "auto")))))
     (llm-provider-merge-non-standard-params
      (llm-chat-prompt-non-standard-params prompt)
-     request))
+     request)))
 
 (cl-defmethod llm-provider-chat-extract-result ((_ llm-openai-responses) response)
   "Extract final assistant text from Responses API RESPONSE."

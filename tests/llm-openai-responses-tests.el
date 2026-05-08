@@ -38,6 +38,31 @@
     (should (equal (llm-provider-chat-url provider)
                    "http://127.0.0.1:11481/v1/responses"))))
 
+(ert-deftest llm-openai-responses-chat-request-serializes-non-streaming-false ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "gpt-5.4"
+                    :embedding-model "text-embedding-3-small"))
+         (prompt (llm-make-simple-chat-prompt "hello"))
+         (request (llm-provider-chat-request provider prompt nil))
+         (json (json-serialize request)))
+    (should (equal (plist-get request :stream) :false))
+    (should (string-match-p "\"stream\":false" json))))
+
+(ert-deftest llm-openai-responses-codex-request-forces-streaming-shape ()
+  (let* ((provider (make-llm-openai-responses
+                    :codex-oauth t
+                    :codex-oauth-user-name "test-user"
+                    :chat-model "gpt-5.4"))
+         (prompt (llm-make-simple-chat-prompt "hello"))
+         (request (llm-provider-chat-request provider prompt t))
+         (json (json-serialize request)))
+    (should (eq (plist-get request :stream) t))
+    (should (equal (plist-get request :instructions) ""))
+    (should (eq (plist-get request :store) :false))
+    (should (string-match-p "\"stream\":true" json))
+    (should (string-match-p "\"store\":false" json))))
+
 (ert-deftest llm-openai-responses-handle-stream-text-and-usage ()
   (let (events errors)
     (llm-openai-responses--handle-stream-event
