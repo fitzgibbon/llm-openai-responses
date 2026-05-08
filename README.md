@@ -36,10 +36,24 @@ official Codex tooling.
 
 When `:codex-oauth` is non-nil, the provider:
 
+- prefers native oauth2.el cached login state when available
 - reads `auth.json` from `CODEX_AUTH_JSON_PATH`, `CHATGPT_LOCAL_HOME`,
   `CODEX_HOME`, `~/.chatgpt-local/auth.json`, or `~/.codex/auth.json`
 - refreshes the OAuth access token using the stored refresh token when needed
 - sends requests to `https://chatgpt.com/backend-api/codex/responses` by default
+
+To create a native Emacs oauth2 login instead of relying on `auth.json`, run:
+
+```elisp
+(M-x llm-openai-responses-codex-login)
+```
+
+That command:
+
+- opens the OpenAI browser login flow
+- listens for the localhost callback in Emacs
+- exchanges the returned authorization code with PKCE enabled
+- stores the token in `oauth2.plstore`
 
 Optional constructor keywords for Codex mode:
 
@@ -47,7 +61,11 @@ Optional constructor keywords for Codex mode:
 - `:codex-account-id`
 - `:codex-client-id`
 - `:codex-issuer`
+- `:codex-auth-url`
 - `:codex-token-url`
+- `:codex-scope`
+- `:codex-oauth-user-name`
+- `:codex-oauth-host-name`
 - `:codex-originator`
 - `:codex-store`
 - `:codex-instructions`

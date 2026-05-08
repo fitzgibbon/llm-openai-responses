@@ -3,7 +3,7 @@
 ;; Author: llm-openai-responses contributors
 ;; Maintainer: llm-openai-responses contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (llm "0"))
+;; Package-Requires: ((emacs "29.1") (llm "0") (oauth2 "0.18.4"))
 ;; Keywords: ai, llm
 ;; URL: https://github.com/fitzgibbon/llm-openai-responses
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -26,9 +26,11 @@
 (require 'subr-x)
 (require 'url)
 (require 'url-http)
+(require 'browse-url)
 (require 'llm)
 (require 'llm-openai)
 (require 'llm-provider-utils)
+(require 'oauth2 nil t)
 
 (defconst llm-openai-responses-default-api-url "https://api.openai.com/v1/"
   "Default OpenAI Responses API base URL.")
@@ -41,6 +43,18 @@
 
 (defconst llm-openai-responses-default-codex-issuer "https://auth.openai.com"
   "Default OAuth issuer used by Codex ChatGPT auth.")
+
+(defconst llm-openai-responses-default-codex-auth-url "https://auth.openai.com/oauth/authorize"
+  "Default OAuth authorization URL used by Codex ChatGPT auth.")
+
+(defconst llm-openai-responses-default-codex-scope "openid profile email offline_access"
+  "Default OAuth scope used by Codex ChatGPT auth.")
+
+(defconst llm-openai-responses-default-codex-oauth-user-name "openai-codex"
+  "Default oauth2 user name for cached Codex ChatGPT auth.")
+
+(defconst llm-openai-responses-default-codex-oauth-host-name "chatgpt.com"
+  "Default oauth2 host name for cached Codex ChatGPT auth.")
 
 (defconst llm-openai-responses-codex-refresh-expiry-margin-seconds (* 5 60)
   "Refresh Codex OAuth tokens this many seconds before access-token expiry.")
@@ -68,7 +82,11 @@ override when the auth file does not already contain one."
   codex-account-id
   codex-client-id
   codex-issuer
+  codex-auth-url
   codex-token-url
+  codex-scope
+  codex-oauth-user-name
+  codex-oauth-host-name
   codex-originator
   codex-store
   codex-instructions)
@@ -190,6 +208,239 @@ LAST-REFRESH is the stored auth-file timestamp string."
                                             llm-openai-responses-default-codex-issuer))
               "/oauth/token")))
 
+(defun llm-openai-responses--codex-auth-url (provider)
+  "Return the OAuth authorization endpoint for PROVIDER."
+  (or (llm-openai-responses-codex-auth-url provider)
+      llm-openai-responses-default-codex-auth-url))
+
+(defun llm-openai-responses--codex-scope (provider)
+  "Return the OAuth scope string for PROVIDER."
+  (or (llm-openai-responses-codex-scope provider)
+      llm-openai-responses-default-codex-scope))
+
+(defun llm-openai-responses--codex-oauth-user-name (provider)
+  "Return the oauth2 cache user name for PROVIDER."
+  (or (llm-openai-responses-codex-oauth-user-name provider)
+      llm-openai-responses-default-codex-oauth-user-name))
+
+(defun llm-openai-responses--codex-oauth-host-name (provider)
+  "Return the oauth2 cache host name for PROVIDER."
+  (or (llm-openai-responses-codex-oauth-host-name provider)
+      llm-openai-responses-default-codex-oauth-host-name))
+
+(defun llm-openai-responses--oauth2-available-p ()
+  "Return non-nil when oauth2.el is available."
+  (featurep 'oauth2))
+
+(defun llm-openai-responses--oauth2-required ()
+  "Signal an error when oauth2.el is unavailable."
+  (unless (llm-openai-responses--oauth2-available-p)
+    (user-error "oauth2.el is required for native Codex browser login")))
+
+(defun llm-openai-responses--codex-oauth-plstore-id (provider)
+  "Return the oauth2 plstore id for PROVIDER."
+  (oauth2-compute-id
+   (llm-openai-responses--codex-auth-url provider)
+   (llm-openai-responses--codex-token-endpoint provider)
+   (llm-openai-responses--codex-scope provider)
+   (or (llm-openai-responses-codex-client-id provider)
+       llm-openai-responses-default-codex-client-id)
+   (llm-openai-responses--codex-oauth-user-name provider)))
+
+(defun llm-openai-responses--oauth2-load-cached-codex-token (provider)
+  "Return cached oauth2 token for PROVIDER, or nil when unavailable."
+  (when (llm-openai-responses--oauth2-available-p)
+    (oauth2--with-plstore
+     (let* ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider))
+            (plist (cdr (plstore-get plstore plstore-id))))
+       (when-let* ((access-response (plist-get plist :access-response))
+                   (refresh-token (cdr (assoc 'refresh_token access-response))))
+         (make-oauth2-token
+          :plstore-id plstore-id
+          :client-id (or (llm-openai-responses-codex-client-id provider)
+                         llm-openai-responses-default-codex-client-id)
+          :client-secret ""
+          :access-token (or (oauth2--get-from-request-cache
+                             (plist-get plist :request-cache)
+                             (llm-openai-responses--codex-oauth-host-name provider)
+                             :access-token)
+                            "")
+          :refresh-token refresh-token
+          :request-cache (plist-get plist :request-cache)
+          :code-verifier (plist-get plist :code-verifier)
+          :auth-url (llm-openai-responses--codex-auth-url provider)
+          :token-url (llm-openai-responses--codex-token-endpoint provider)
+          :access-response access-response))))))
+
+(defun llm-openai-responses--oauth2-token-account-id (token provider)
+  "Return account id for oauth2 TOKEN and PROVIDER."
+  (let* ((access-response (oauth2-token-access-response token))
+         (id-token (cdr (assoc 'id_token access-response)))
+         (stored-account-id (cdr (assoc 'account_id access-response))))
+    (or (llm-openai-responses-codex-account-id provider)
+        stored-account-id
+        (llm-openai-responses--jwt-account-id id-token)
+        (llm-openai-responses--jwt-account-id (oauth2-token-access-token token)))))
+
+(defun llm-openai-responses--oauth2-codex-auth (provider)
+  "Return Codex auth plist from cached oauth2 state for PROVIDER."
+  (when-let ((token (llm-openai-responses--oauth2-load-cached-codex-token provider)))
+    (oauth2-refresh-access token (llm-openai-responses--codex-oauth-host-name provider))
+    (when-let ((account-id (llm-openai-responses--oauth2-token-account-id token provider)))
+      (let ((access-token (oauth2-token-access-token token)))
+        (unless (string-empty-p access-token)
+          (list :access-token access-token :account-id account-id))))))
+
+(defun llm-openai-responses--random-state ()
+  "Return a random OAuth state string."
+  (secure-hash 'sha256
+               (format "%s:%s:%s"
+                       (emacs-pid)
+                       (float-time (current-time))
+                       (random most-positive-fixnum))))
+
+(defun llm-openai-responses--callback-response (status title body)
+  "Return an HTML callback response using STATUS, TITLE, and BODY."
+  (format (concat "HTTP/1.1 %s\r\n"
+                  "Content-Type: text/html; charset=utf-8\r\n"
+                  "Connection: close\r\n\r\n"
+                  "<!doctype html><html><head><meta charset=\"utf-8\">"
+                  "<title>%s</title></head><body><h1>%s</h1><p>%s</p></body></html>")
+          status title title body))
+
+(defun llm-openai-responses--callback-param (params name)
+  "Return first query param NAME from PARAMS."
+  (car (alist-get name params nil nil #'string=)))
+
+(defun llm-openai-responses--make-callback-filter (result expected-state)
+  "Return a process filter that stores callback data into RESULT.
+
+EXPECTED-STATE is compared against the callback state parameter."
+  (lambda (proc chunk)
+    (let ((buffer (concat (or (process-get proc 'payload) "") chunk)))
+      (process-put proc 'payload buffer)
+      (when (string-match-p "\r?\n\r?\n" buffer)
+        (let* ((request-line (car (split-string buffer "\r?\n" t)))
+               (path+query (when (string-match "\\`GET \\([^ ]+\\) HTTP/" request-line)
+                             (match-string 1 request-line)))
+               (query (cadr (split-string (or path+query "") "?" t)))
+               (params (url-parse-query-string (or query ""))))
+          (cond
+           ((null path+query)
+            (process-send-string proc
+                                 (llm-openai-responses--callback-response
+                                  "400 Bad Request"
+                                  "Sign-in Failed"
+                                  "Missing callback path.")))
+           ((not (string-prefix-p "/auth/callback" path+query))
+            (process-send-string proc
+                                 (llm-openai-responses--callback-response
+                                  "404 Not Found"
+                                  "Not Found"
+                                  "This endpoint only handles /auth/callback.")))
+           ((not (equal (llm-openai-responses--callback-param params "state") expected-state))
+            (setcar result (cons :error "OAuth callback state mismatch"))
+            (process-send-string proc
+                                 (llm-openai-responses--callback-response
+                                  "400 Bad Request"
+                                  "Sign-in Failed"
+                                  "OAuth state mismatch.")))
+           ((llm-openai-responses--callback-param params "error")
+            (setcar result (cons :error
+                                 (or (llm-openai-responses--callback-param params "error_description")
+                                     (llm-openai-responses--callback-param params "error"))))
+            (process-send-string proc
+                                 (llm-openai-responses--callback-response
+                                  "400 Bad Request"
+                                  "Sign-in Failed"
+                                  "The OAuth provider returned an error.")))
+           ((llm-openai-responses--callback-param params "code")
+            (setcar result (cons :code (llm-openai-responses--callback-param params "code")))
+            (process-send-string proc
+                                 (llm-openai-responses--callback-response
+                                  "200 OK"
+                                  "Sign-in Complete"
+                                  "You can return to Emacs now.")))
+           (t
+            (setcar result (cons :error "Missing authorization code"))
+            (process-send-string proc
+                                 (llm-openai-responses--callback-response
+                                  "400 Bad Request"
+                                  "Sign-in Failed"
+                                  "Missing authorization code.")))))
+        (delete-process proc)))))
+
+(defun llm-openai-responses--callback-server-port (server)
+  "Return the local port for callback SERVER."
+  (or (car (last (process-contact server :local)))
+      (process-contact server :service)))
+
+(defun llm-openai-responses--await-callback (server result &optional timeout)
+  "Wait for callback SERVER to populate RESULT up to TIMEOUT seconds."
+  (let ((deadline (+ (float-time (current-time)) (or timeout 180))))
+    (while (and (null (car result))
+                (< (float-time (current-time)) deadline))
+      (accept-process-output server 1))
+    (or (car result)
+        (cons :error "Timed out waiting for OAuth callback"))))
+
+(defun llm-openai-responses--persist-oauth2-token (provider token)
+  "Persist oauth2 TOKEN for PROVIDER and return TOKEN."
+  (llm-openai-responses--oauth2-required)
+  (setf (oauth2-token-plstore-id token)
+        (llm-openai-responses--codex-oauth-plstore-id provider))
+  (oauth2--with-plstore
+   (oauth2--update-plstore plstore token))
+  token)
+
+(defun llm-openai-responses--begin-codex-browser-login (provider)
+  "Run an interactive browser login for PROVIDER and return an oauth2 token."
+  (llm-openai-responses--oauth2-required)
+  (let* ((state (llm-openai-responses--random-state))
+         (code-verifier (oauth2--generate-code-verifier))
+         (result (list nil))
+         (server (make-network-process
+                  :name "llm-openai-responses-codex-login"
+                  :server t
+                  :host "127.0.0.1"
+                  :service 0
+                  :family 'ipv4
+                  :filter (llm-openai-responses--make-callback-filter result state)
+                  :noquery t))
+         (port (llm-openai-responses--callback-server-port server))
+         (redirect-uri (format "http://localhost:%s/auth/callback" port))
+         (auth-url (oauth2--build-url
+                    (llm-openai-responses--codex-auth-url provider)
+                    "client_id" (or (llm-openai-responses-codex-client-id provider)
+                                    llm-openai-responses-default-codex-client-id)
+                    "response_type" "code"
+                    "redirect_uri" redirect-uri
+                    "scope" (llm-openai-responses--codex-scope provider)
+                    "state" state
+                    "access_type" "offline"
+                    "prompt" "consent"
+                    "code_challenge" (oauth2--get-challenge-from-verifier code-verifier)
+                    "code_challenge_method" "S256")))
+    (unwind-protect
+        (progn
+          (browse-url auth-url)
+          (pcase-let ((`(,kind . ,value)
+                       (llm-openai-responses--await-callback server result 180)))
+            (unless (eq kind :code)
+              (user-error "%s" value))
+            (oauth2-request-access
+             (llm-openai-responses--codex-auth-url provider)
+             (llm-openai-responses--codex-token-endpoint provider)
+             (or (llm-openai-responses-codex-client-id provider)
+                 llm-openai-responses-default-codex-client-id)
+             ""
+             value
+             redirect-uri
+             (llm-openai-responses--codex-oauth-host-name provider)
+             code-verifier)))
+      (when (process-live-p server)
+        (delete-process server)))))
+
 (defun llm-openai-responses--codex-refresh-payload (provider refresh-token)
   "Return the refresh request payload for PROVIDER and REFRESH-TOKEN."
   (json-serialize
@@ -263,33 +514,53 @@ Return the updated auth-data alist on refresh success, otherwise AUTH-DATA."
 
 (defun llm-openai-responses--codex-auth (provider)
   "Return a plist with Codex OAuth auth details for PROVIDER."
-  (let* ((key-token (llm-openai-responses--call-key (llm-openai-key provider)))
-         (explicit-account-id (llm-openai-responses-codex-account-id provider))
-         (auth-entry (llm-openai-responses--find-codex-auth-file
-                      (llm-openai-responses-codex-auth-file provider)))
-         (auth-file (car-safe auth-entry))
-         (auth-data (cdr-safe auth-entry)))
-    (when (and auth-data auth-file)
-      (let* ((tokens (assoc-default 'tokens auth-data))
-             (access-token (assoc-default 'access_token tokens))
-             (last-refresh (assoc-default 'last_refresh auth-data)))
-        (when (llm-openai-responses--codex-token-expiring-p access-token last-refresh)
-          (setq auth-data (llm-openai-responses--refresh-codex-auth provider auth-file auth-data)))))
-    (let* ((tokens (assoc-default 'tokens auth-data))
-           (access-token (or key-token
-                             (assoc-default 'access_token tokens)))
-           (id-token (assoc-default 'id_token tokens))
-           (account-id (or explicit-account-id
-                           (assoc-default 'account_id tokens)
-                           (llm-openai-responses--jwt-account-id id-token)
-                           (llm-openai-responses--jwt-account-id access-token))))
-      (unless (and (stringp access-token) (not (string-empty-p access-token)))
-        (signal 'llm-provider-unconfigured
-                '("No Codex OAuth access token available. Run `codex login` to create auth.json.")))
-      (unless (and (stringp account-id) (not (string-empty-p account-id)))
-        (signal 'llm-provider-unconfigured
-                '("No Codex OAuth account id available. Re-authenticate with `codex login`.")))
-      (list :access-token access-token :account-id account-id))))
+  (or (llm-openai-responses--oauth2-codex-auth provider)
+      (let* ((key-token (llm-openai-responses--call-key (llm-openai-key provider)))
+             (explicit-account-id (llm-openai-responses-codex-account-id provider))
+             (auth-entry (llm-openai-responses--find-codex-auth-file
+                          (llm-openai-responses-codex-auth-file provider)))
+             (auth-file (car-safe auth-entry))
+             (auth-data (cdr-safe auth-entry)))
+        (when (and auth-data auth-file)
+          (let* ((tokens (assoc-default 'tokens auth-data))
+                 (access-token (assoc-default 'access_token tokens))
+                 (last-refresh (assoc-default 'last_refresh auth-data)))
+            (when (llm-openai-responses--codex-token-expiring-p access-token last-refresh)
+              (setq auth-data (llm-openai-responses--refresh-codex-auth provider auth-file auth-data)))))
+        (let* ((tokens (assoc-default 'tokens auth-data))
+               (access-token (or key-token
+                                 (assoc-default 'access_token tokens)))
+               (id-token (assoc-default 'id_token tokens))
+               (account-id (or explicit-account-id
+                               (assoc-default 'account_id tokens)
+                               (llm-openai-responses--jwt-account-id id-token)
+                               (llm-openai-responses--jwt-account-id access-token))))
+          (unless (and (stringp access-token) (not (string-empty-p access-token)))
+            (signal 'llm-provider-unconfigured
+                    '("No Codex OAuth access token available. Run `M-x llm-openai-responses-codex-login` or `codex login`.")))
+          (unless (and (stringp account-id) (not (string-empty-p account-id)))
+            (signal 'llm-provider-unconfigured
+                    '("No Codex OAuth account id available. Re-authenticate with `M-x llm-openai-responses-codex-login` or `codex login`.")))
+          (list :access-token access-token :account-id account-id)))))
+
+;;;###autoload
+(defun llm-openai-responses-codex-login (&optional provider)
+  "Authenticate a Codex OAuth session in the browser and cache it via oauth2.
+
+When PROVIDER is nil, use a default Codex-backed `llm-openai-responses'
+provider configuration."
+  (interactive)
+  (let* ((provider (or provider (make-llm-openai-responses :codex-oauth t)))
+         (token (llm-openai-responses--begin-codex-browser-login provider))
+         (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
+    (unless account-id
+      (user-error "Codex OAuth login succeeded, but no account id was returned"))
+    (setf (oauth2-token-access-response token)
+          (cons (cons 'account_id account-id)
+                (oauth2-token-access-response token)))
+    (llm-openai-responses--persist-oauth2-token provider token)
+    (message "Codex OAuth login succeeded for account %s" account-id)
+    token))
 
 (defun llm-openai-responses--provider-base-url (provider)
   "Return the effective base URL for PROVIDER."
