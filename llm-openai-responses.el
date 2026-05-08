@@ -72,6 +72,9 @@
 (defconst llm-openai-responses-codex-refresh-interval-seconds (* 55 60)
   "Refresh Codex OAuth tokens this often even if JWT expiry is unavailable.")
 
+(defconst llm-openai-responses-codex-login-timeout-seconds (* 5 60)
+  "Wait this long for the Codex OAuth browser callback.")
+
 (cl-defstruct (llm-openai-responses
                (:include llm-openai-compatible
                          (url llm-openai-responses-default-api-url)))
@@ -389,7 +392,8 @@ secondary port when the preferred port is already in use."
 
 (defun llm-openai-responses--await-callback (server result &optional timeout)
   "Wait for callback SERVER to populate RESULT up to TIMEOUT seconds."
-  (let ((deadline (+ (float-time (current-time)) (or timeout 180))))
+  (let ((deadline (+ (float-time (current-time))
+                     (or timeout llm-openai-responses-codex-login-timeout-seconds))))
     (while (and (null (car result))
                 (< (float-time (current-time)) deadline))
       (accept-process-output server 1))
@@ -409,11 +413,20 @@ secondary port when the preferred port is already in use."
   (when fn
     (apply #'run-at-time 0 nil fn args)))
 
-(defun llm-openai-responses--begin-codex-browser-login (provider &optional open-url-fn)
-  "Run an interactive browser login for PROVIDER and return an oauth2 token.
+(cl-defstruct llm-openai-responses-codex-login-session
+  provider
+  result
+  server
+  redirect-uri
+  auth-url
+  code-verifier)
 
-When OPEN-URL-FN is non-nil, call it with the OAuth authorization URL instead
-of using `browse-url'."
+(defun llm-openai-responses--start-codex-browser-login (provider)
+  "Create a Codex browser-login session for PROVIDER.
+
+The returned session includes the callback server, redirect URI, auth URL, and
+PKCE verifier.  Callers are responsible for opening the auth URL and finishing
+or cancelling the session."
   (unless (and provider (llm-openai-responses-codex-oauth provider))
     (user-error "Codex browser login requires an explicit Codex OAuth provider"))
   (llm-openai-responses--codex-oauth-user-name provider)
@@ -424,26 +437,44 @@ of using `browse-url'."
          (port (llm-openai-responses--callback-server-port server))
          (redirect-uri (format "http://localhost:%s/auth/callback" port))
          (auth-url (llm-openai-responses--build-codex-auth-url
-                    provider redirect-uri state code-verifier)))
+                     provider redirect-uri state code-verifier)))
+    (make-llm-openai-responses-codex-login-session
+     :provider provider
+     :result result
+     :server server
+     :redirect-uri redirect-uri
+     :auth-url auth-url
+     :code-verifier code-verifier)))
+
+(defun llm-openai-responses--cancel-codex-browser-login (session)
+  "Tear down callback resources for Codex login SESSION."
+  (when-let ((server (llm-openai-responses-codex-login-session-server session)))
+    (when (process-live-p server)
+      (delete-process server))))
+
+(defun llm-openai-responses--finish-codex-browser-login (session)
+  "Wait for callback completion and exchange tokens for SESSION."
+  (let* ((provider (llm-openai-responses-codex-login-session-provider session))
+         (result (llm-openai-responses-codex-login-session-result session))
+         (server (llm-openai-responses-codex-login-session-server session))
+         (redirect-uri (llm-openai-responses-codex-login-session-redirect-uri session))
+         (code-verifier (llm-openai-responses-codex-login-session-code-verifier session)))
     (unwind-protect
-        (progn
-          (funcall (or open-url-fn #'browse-url) auth-url)
-          (pcase-let ((`(,kind . ,value)
-                       (llm-openai-responses--await-callback server result 180)))
-            (unless (eq kind :code)
-              (user-error "%s" value))
-            (oauth2-request-access
-             (llm-openai-responses--codex-auth-url provider)
-             (llm-openai-responses--codex-token-endpoint provider)
-             (or (llm-openai-responses-codex-client-id provider)
-                 llm-openai-responses-default-codex-client-id)
-             ""
-             value
-             redirect-uri
-             (llm-openai-responses--codex-oauth-host-name provider)
-             code-verifier)))
-      (when (process-live-p server)
-        (delete-process server)))))
+        (pcase-let ((`(,kind . ,value)
+                     (llm-openai-responses--await-callback server result)))
+          (unless (eq kind :code)
+            (user-error "%s" value))
+          (oauth2-request-access
+           (llm-openai-responses--codex-auth-url provider)
+           (llm-openai-responses--codex-token-endpoint provider)
+           (or (llm-openai-responses-codex-client-id provider)
+               llm-openai-responses-default-codex-client-id)
+           ""
+           value
+           redirect-uri
+           (llm-openai-responses--codex-oauth-host-name provider)
+           code-verifier))
+      (llm-openai-responses--cancel-codex-browser-login session))))
 
 (defun llm-openai-responses--codex-refresh-payload (provider refresh-token)
   "Return the refresh request payload for PROVIDER and REFRESH-TOKEN."
@@ -531,7 +562,10 @@ provider object with `:codex-oauth-user-name' set.
 
 When OPEN-URL-FN is non-nil, call it with the authorization URL instead of
 opening the browser via `browse-url'."
-  (let* ((token (llm-openai-responses--begin-codex-browser-login provider open-url-fn))
+  (let* ((session (llm-openai-responses--start-codex-browser-login provider))
+         (_ (funcall (or open-url-fn #'browse-url)
+                     (llm-openai-responses-codex-login-session-auth-url session)))
+         (token (llm-openai-responses--finish-codex-browser-login session))
          (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
     (unless account-id
       (user-error "Codex OAuth login succeeded, but no account id was returned"))
@@ -547,20 +581,33 @@ opening the browser via `browse-url'."
     (provider &optional open-url-fn success-fn error-fn)
   "Authenticate PROVIDER asynchronously and return the worker thread.
 
-OPEN-URL-FN is forwarded to `llm-openai-responses-codex-login'.  SUCCESS-FN is
-called on the main thread with the resulting token when login succeeds.
-ERROR-FN is called on the main thread with the signaled error object when login
-fails."
+OPEN-URL-FN is called on the main thread with the authorization URL.  The
+callback server and wait loop stay on the worker thread because Emacs network
+processes are locked to the thread that created them.  SUCCESS-FN is called on
+the main thread with the resulting token when login succeeds.  ERROR-FN is
+called on the main thread with the signaled error object when login fails."
   (make-thread
    (lambda ()
      (condition-case err
-         (let ((token (llm-openai-responses-codex-login provider open-url-fn)))
+         (let* ((session (llm-openai-responses--start-codex-browser-login provider))
+                (_ (llm-openai-responses--run-on-main-thread
+                    (or open-url-fn #'browse-url)
+                    (llm-openai-responses-codex-login-session-auth-url session)))
+                (provider (llm-openai-responses-codex-login-session-provider session))
+                (token (llm-openai-responses--finish-codex-browser-login session))
+                (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
+           (unless account-id
+             (user-error "Codex OAuth login succeeded, but no account id was returned"))
+           (setf (oauth2-token-access-response token)
+                 (cons (cons 'account_id account-id)
+                       (oauth2-token-access-response token)))
+           (llm-openai-responses--persist-oauth2-token provider token)
            (llm-openai-responses--run-on-main-thread success-fn token)
            token)
        (error
-        (llm-openai-responses--run-on-main-thread error-fn err)
-        nil)))
-   "llm-openai-responses-codex-login"))
+         (llm-openai-responses--run-on-main-thread error-fn err)
+         nil)))
+     "llm-openai-responses-codex-login"))
 
 (defun llm-openai-responses--provider-base-url (provider)
   "Return the effective base URL for PROVIDER."
