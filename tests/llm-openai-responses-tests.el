@@ -85,3 +85,28 @@
                    "true"))
     (should (equal (car (alist-get "originator" params nil nil #'string=))
                    "codex_cli_rs"))))
+
+(ert-deftest llm-openai-responses-codex-callback-server-uses-registered-port ()
+  (let ((server (llm-openai-responses--make-codex-callback-server (list nil) "state-123")))
+    (unwind-protect
+        (should (memq (llm-openai-responses--callback-server-port server)
+                      '(1455 1457)))
+      (when (process-live-p server)
+        (delete-process server)))))
+
+(ert-deftest llm-openai-responses-codex-callback-server-falls-back-to-secondary-port ()
+  (let ((primary (make-network-process :name "llm-openai-responses-primary-port-guard"
+                                       :server t
+                                       :host "127.0.0.1"
+                                       :service 1455
+                                       :family 'ipv4
+                                       :noquery t))
+        server)
+    (unwind-protect
+        (progn
+          (setq server (llm-openai-responses--make-codex-callback-server (list nil) "state-123"))
+          (should (= (llm-openai-responses--callback-server-port server) 1457)))
+      (when (process-live-p server)
+        (delete-process server))
+      (when (process-live-p primary)
+        (delete-process primary)))))

@@ -47,6 +47,12 @@
 (defconst llm-openai-responses-default-codex-auth-url "https://auth.openai.com/oauth/authorize"
   "Default OAuth authorization URL used by Codex ChatGPT auth.")
 
+(defconst llm-openai-responses-default-codex-callback-port 1455
+  "Default localhost callback port used by the official Codex login flow.")
+
+(defconst llm-openai-responses-fallback-codex-callback-port 1457
+  "Fallback localhost callback port used when the default Codex port is unavailable.")
+
 (defconst llm-openai-responses-default-codex-scope "openid profile email offline_access"
   "Default OAuth scope used by Codex ChatGPT auth.")
 
@@ -355,6 +361,32 @@ EXPECTED-STATE is compared against the callback state parameter."
              (aref local (1- (length local))))
         (process-contact server :service))))
 
+(defun llm-openai-responses--make-codex-callback-server (result state)
+  "Start a localhost callback server for RESULT and STATE.
+
+Prefer the official Codex callback port, then fall back to the registered
+secondary port when the preferred port is already in use."
+  (let ((ports (list llm-openai-responses-default-codex-callback-port
+                     llm-openai-responses-fallback-codex-callback-port))
+        server)
+    (while (and ports (null server))
+      (condition-case err
+          (setq server
+                (make-network-process
+                 :name "llm-openai-responses-codex-login"
+                 :server t
+                 :host "127.0.0.1"
+                 :service (car ports)
+                 :family 'ipv4
+                 :filter (llm-openai-responses--make-callback-filter result state)
+                 :noquery t))
+        (file-error
+         (setq ports (cdr ports)))))
+    (or server
+        (user-error "Unable to start Codex OAuth callback server on localhost:%s or localhost:%s"
+                    llm-openai-responses-default-codex-callback-port
+                    llm-openai-responses-fallback-codex-callback-port))))
+
 (defun llm-openai-responses--await-callback (server result &optional timeout)
   "Wait for callback SERVER to populate RESULT up to TIMEOUT seconds."
   (let ((deadline (+ (float-time (current-time)) (or timeout 180))))
@@ -380,14 +412,7 @@ EXPECTED-STATE is compared against the callback state parameter."
   (let* ((state (llm-openai-responses--random-state))
          (code-verifier (oauth2--generate-code-verifier))
          (result (list nil))
-         (server (make-network-process
-                  :name "llm-openai-responses-codex-login"
-                  :server t
-                  :host "127.0.0.1"
-                  :service 0
-                  :family 'ipv4
-                  :filter (llm-openai-responses--make-callback-filter result state)
-                   :noquery t))
+         (server (llm-openai-responses--make-codex-callback-server result state))
          (port (llm-openai-responses--callback-server-port server))
          (redirect-uri (format "http://localhost:%s/auth/callback" port))
          (auth-url (llm-openai-responses--build-codex-auth-url
