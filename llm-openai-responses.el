@@ -879,12 +879,12 @@ produces a valid JSON `false` literal.  `:json-false' is returned by
                  (setf (llm-provider-utils-tool-use-id tool) id))
                (when name
                  (setf (llm-provider-utils-tool-use-name tool) name))
-               (when arguments
-                 (setf (llm-provider-utils-tool-use-args tool)
-                       (if (plist-get fragment 'replace)
-                           arguments
-                         (concat (llm-provider-utils-tool-use-args tool)
-                                 arguments))))))
+                (when arguments
+                  (setf (llm-provider-utils-tool-use-args tool)
+                        (if (plist-get fragment 'replace)
+                            arguments
+                          (concat (llm-provider-utils-tool-use-args tool)
+                                  arguments)))))))
     (maphash
      (lambda (_ tool)
        (setf (llm-provider-utils-tool-use-args tool)
