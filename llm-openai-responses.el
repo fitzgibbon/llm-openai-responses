@@ -50,6 +50,13 @@
 (defconst llm-openai-responses-default-codex-scope "openid profile email offline_access"
   "Default OAuth scope used by Codex ChatGPT auth.")
 
+(defconst llm-openai-responses-default-codex-login-scope
+  "openid profile email offline_access api.connectors.read api.connectors.invoke"
+  "Default OAuth scope used by the official Codex browser login flow.")
+
+(defconst llm-openai-responses-default-codex-originator "codex_cli_rs"
+  "Default originator used by Codex ChatGPT auth flows.")
+
 (defconst llm-openai-responses-default-codex-oauth-host-name "chatgpt.com"
   "Default oauth2 host name for cached Codex ChatGPT auth.")
 
@@ -158,6 +165,38 @@ token response does not already contain one."
   "Return the OAuth scope string for PROVIDER."
   (or (llm-openai-responses-codex-scope provider)
       llm-openai-responses-default-codex-scope))
+
+(defun llm-openai-responses--codex-login-scope (provider)
+  "Return the browser-login OAuth scope string for PROVIDER."
+  (or (llm-openai-responses-codex-scope provider)
+      llm-openai-responses-default-codex-login-scope))
+
+(defun llm-openai-responses--codex-originator (provider)
+  "Return the Codex originator string for PROVIDER."
+  (llm-openai-responses--coerce-string
+   (or (llm-openai-responses-codex-originator provider)
+       llm-openai-responses-default-codex-originator)))
+
+(defun llm-openai-responses--build-codex-auth-url (provider redirect-uri state code-verifier)
+  "Build the Codex browser-login authorization URL for PROVIDER.
+
+REDIRECT-URI, STATE, and CODE-VERIFIER come from the local PKCE flow."
+  (let ((params (list
+                 "client_id" (or (llm-openai-responses-codex-client-id provider)
+                                 llm-openai-responses-default-codex-client-id)
+                 "response_type" "code"
+                 "redirect_uri" redirect-uri
+                 "scope" (llm-openai-responses--codex-login-scope provider)
+                 "state" state
+                 "code_challenge" (oauth2--get-challenge-from-verifier code-verifier)
+                 "code_challenge_method" "S256"
+                 "id_token_add_organizations" "true"
+                 "codex_cli_simplified_flow" "true")))
+    (when-let ((originator (llm-openai-responses--codex-originator provider)))
+      (setq params (append params (list "originator" originator))))
+    (apply #'oauth2--build-url
+           (llm-openai-responses--codex-auth-url provider)
+           params)))
 
 (defun llm-openai-responses--codex-oauth-user-name (provider)
   "Return the explicit oauth2 cache user name for PROVIDER.
@@ -348,21 +387,11 @@ EXPECTED-STATE is compared against the callback state parameter."
                   :service 0
                   :family 'ipv4
                   :filter (llm-openai-responses--make-callback-filter result state)
-                  :noquery t))
+                   :noquery t))
          (port (llm-openai-responses--callback-server-port server))
          (redirect-uri (format "http://localhost:%s/auth/callback" port))
-         (auth-url (oauth2--build-url
-                    (llm-openai-responses--codex-auth-url provider)
-                    "client_id" (or (llm-openai-responses-codex-client-id provider)
-                                    llm-openai-responses-default-codex-client-id)
-                    "response_type" "code"
-                    "redirect_uri" redirect-uri
-                    "scope" (llm-openai-responses--codex-scope provider)
-                    "state" state
-                    "access_type" "offline"
-                    "prompt" "consent"
-                    "code_challenge" (oauth2--get-challenge-from-verifier code-verifier)
-                    "code_challenge_method" "S256")))
+         (auth-url (llm-openai-responses--build-codex-auth-url
+                    provider redirect-uri state code-verifier)))
     (unwind-protect
         (progn
           (browse-url auth-url)
@@ -701,9 +730,7 @@ partials instead of being appended again."
              (headers `(("Authorization" . ,(format "Bearer %s" token))
                         ("chatgpt-account-id" . ,(plist-get auth :account-id))
                         ("OpenAI-Beta" . "responses=experimental"))))
-        (if-let ((originator (llm-openai-responses--coerce-string
-                              (or (llm-openai-responses-codex-originator provider)
-                                  "pi"))))
+        (if-let ((originator (llm-openai-responses--codex-originator provider)))
             (append headers `(("originator" . ,originator)))
           headers))
     (cl-call-next-method)))

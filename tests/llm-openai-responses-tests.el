@@ -64,3 +64,24 @@
         (should (integerp (llm-openai-responses--callback-server-port server)))
       (when (process-live-p server)
         (delete-process server)))))
+
+(ert-deftest llm-openai-responses-codex-auth-url-matches-cli-shape ()
+  (let* ((provider (make-llm-openai-responses
+                    :codex-oauth t
+                    :codex-oauth-user-name "test-user"
+                    :chat-model "gpt-5.5"))
+         (url (url-generic-parse-url
+               (llm-openai-responses--build-codex-auth-url
+                provider
+                "http://localhost:1455/auth/callback"
+                "state-123"
+                "verifier-123")))
+         (params (url-parse-query-string (url-filename url))))
+    (should (equal (car (alist-get "scope" params nil nil #'string=))
+                   "openid profile email offline_access api.connectors.read api.connectors.invoke"))
+    (should (equal (car (alist-get "id_token_add_organizations" params nil nil #'string=))
+                   "true"))
+    (should (equal (car (alist-get "codex_cli_simplified_flow" params nil nil #'string=))
+                   "true"))
+    (should (equal (car (alist-get "originator" params nil nil #'string=))
+                   "codex_cli_rs"))))
