@@ -30,6 +30,7 @@ official Codex tooling.
 (setq my-codex-provider
       (make-llm-openai-responses
         :codex-oauth t
+        :codex-oauth-user-name "openai-fs-codex"
         :chat-model "gpt-5.5"
         :reasoning-summary "auto"))
 ```
@@ -40,18 +41,22 @@ When `:codex-oauth` is non-nil, the provider:
 - refreshes the OAuth access token using the stored refresh token when needed
 - sends requests to `https://chatgpt.com/backend-api/codex/responses` by default
 
-To create a native Emacs oauth2 login, run:
+To create a native Emacs oauth2 login, pass an explicit provider object:
 
 ```elisp
-(M-x llm-openai-responses-codex-login)
+(llm-openai-responses-codex-login my-codex-provider)
 ```
 
-That command:
+That function:
 
 - opens the OpenAI browser login flow
 - listens for the localhost callback in Emacs
 - exchanges the returned authorization code with PKCE enabled
 - stores the token in `oauth2.plstore`
+
+`llm-openai-responses` does not maintain its own named provider registry, so
+interactive provider selection belongs in the calling application, not in the
+package itself.
 
 Optional constructor keywords for Codex mode:
 

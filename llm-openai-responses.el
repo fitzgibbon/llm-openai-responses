@@ -50,9 +50,6 @@
 (defconst llm-openai-responses-default-codex-scope "openid profile email offline_access"
   "Default OAuth scope used by Codex ChatGPT auth.")
 
-(defconst llm-openai-responses-default-codex-oauth-user-name "openai-codex"
-  "Default oauth2 user name for cached Codex ChatGPT auth.")
-
 (defconst llm-openai-responses-default-codex-oauth-host-name "chatgpt.com"
   "Default oauth2 host name for cached Codex ChatGPT auth.")
 
@@ -163,9 +160,15 @@ token response does not already contain one."
       llm-openai-responses-default-codex-scope))
 
 (defun llm-openai-responses--codex-oauth-user-name (provider)
-  "Return the oauth2 cache user name for PROVIDER."
-  (or (llm-openai-responses-codex-oauth-user-name provider)
-      llm-openai-responses-default-codex-oauth-user-name))
+  "Return the explicit oauth2 cache user name for PROVIDER.
+
+Codex OAuth providers must set `:codex-oauth-user-name' explicitly so each
+provider's persisted session identity is unambiguous." 
+  (let ((user-name (llm-openai-responses-codex-oauth-user-name provider)))
+    (unless (and (stringp user-name) (not (string-empty-p user-name)))
+      (user-error (concat "Codex OAuth providers must set :codex-oauth-user-name "
+                          "explicitly")))
+    user-name))
 
 (defun llm-openai-responses--codex-oauth-host-name (provider)
   "Return the oauth2 cache host name for PROVIDER."
@@ -328,6 +331,9 @@ EXPECTED-STATE is compared against the callback state parameter."
 
 (defun llm-openai-responses--begin-codex-browser-login (provider)
   "Run an interactive browser login for PROVIDER and return an oauth2 token."
+  (unless (and provider (llm-openai-responses-codex-oauth provider))
+    (user-error "Codex browser login requires an explicit Codex OAuth provider"))
+  (llm-openai-responses--codex-oauth-user-name provider)
   (let* ((state (llm-openai-responses--random-state))
          (code-verifier (oauth2--generate-code-verifier))
          (result (list nil))
@@ -451,14 +457,12 @@ Return the updated auth-data alist on refresh success, otherwise AUTH-DATA."
               '("No Codex OAuth access token available. Run `M-x llm-openai-responses-codex-login`."))))
 
 ;;;###autoload
-(defun llm-openai-responses-codex-login (&optional provider)
-  "Authenticate a Codex OAuth session in the browser and cache it via oauth2.
+(defun llm-openai-responses-codex-login (provider)
+  "Authenticate PROVIDER in the browser and cache it via oauth2.
 
-When PROVIDER is nil, use a default Codex-backed `llm-openai-responses'
-provider configuration."
-  (interactive)
-  (let* ((provider (or provider (make-llm-openai-responses :codex-oauth t)))
-         (token (llm-openai-responses--begin-codex-browser-login provider))
+PROVIDER must be an explicit Codex OAuth-backed `llm-openai-responses'
+provider object with `:codex-oauth-user-name' set."
+  (let* ((token (llm-openai-responses--begin-codex-browser-login provider))
          (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
     (unless account-id
       (user-error "Codex OAuth login succeeded, but no account id was returned"))
