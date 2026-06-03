@@ -97,6 +97,51 @@
     (should (equal (llm-provider-utils-tool-use-name tool) "lookup"))
     (should (equal (assoc-default 'city (llm-provider-utils-tool-use-args tool)) "Paris"))))
 
+(ert-deftest llm-openai-responses-chat-request-serializes-unicode-tool-arguments ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "gpt-5.4"
+                    :embedding-model "text-embedding-3-small"))
+         (tool-use (make-llm-provider-utils-tool-use
+                    :id "call_1"
+                    :name "eval"
+                    :args '((source . "(list \"☀️\" \"ok\")"))))
+         (prompt (llm-make-chat-prompt "ACTIVE USER TURN"))
+         (request nil))
+    (llm-provider-populate-tool-uses provider prompt (list tool-use))
+    (setq request (llm-provider-chat-request provider prompt t))
+    (should (stringp (json-serialize request)))))
+
+(ert-deftest llm-openai-responses-chat-request-serializes-unibyte-unicode-tool-output ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "gpt-5.4"
+                    :embedding-model "text-embedding-3-small"))
+         (prompt (llm-make-chat-prompt "ACTIVE USER TURN"))
+         (output (encode-coding-string "(:ok t :value \"☀️\")" 'utf-8 t))
+         (request nil))
+    (setf (llm-chat-prompt-interactions prompt)
+          (append (llm-chat-prompt-interactions prompt)
+                  (list (make-llm-chat-prompt-interaction
+                         :role 'tool-results
+                         :tool-results
+                         (list (make-llm-chat-prompt-tool-result
+                                :call-id "call_1"
+                                :tool-name "eval"
+                                :result output))))))
+    (setq request (llm-provider-chat-request provider prompt t))
+    (should (stringp (json-serialize request)))))
+
+(ert-deftest llm-openai-responses-chat-request-serializes-unibyte-unicode-content ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "gpt-5.4"
+                    :embedding-model "text-embedding-3-small"))
+         (prompt (llm-make-chat-prompt
+                  (encode-coding-string "Hello ☀️" 'utf-8 t)))
+         (request (llm-provider-chat-request provider prompt t)))
+    (should (stringp (json-serialize request)))))
+
 (ert-deftest llm-openai-responses-callback-server-port-supports-vector-contact ()
   (let ((server (make-network-process :name "llm-openai-responses-test-server"
                                       :server t
