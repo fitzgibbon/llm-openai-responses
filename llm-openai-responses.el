@@ -727,6 +727,33 @@ missing-argument error instead of a low-level type error."
         parsed
       nil)))
 
+(defun llm-openai-responses--multibyte-string (value)
+  "Return VALUE as a multibyte string."
+  (let ((text (format "%s" value)))
+    (if (multibyte-string-p text)
+        text
+      (decode-coding-string text 'utf-8 t))))
+
+(defun llm-openai-responses--normalize-request-strings (value)
+  "Return VALUE with all unibyte strings decoded as UTF-8 text."
+  (cond
+   ((stringp value) (llm-openai-responses--multibyte-string value))
+   ((consp value)
+    (cons (llm-openai-responses--normalize-request-strings (car value))
+          (llm-openai-responses--normalize-request-strings (cdr value))))
+   ((vectorp value)
+    (vconcat (mapcar #'llm-openai-responses--normalize-request-strings value)))
+   (t value)))
+
+(defun llm-openai-responses--json-serialize-string (value)
+  "Serialize VALUE to a multibyte JSON string.
+
+Responses API function_call `arguments' is itself a JSON string nested inside
+the outer JSON request.  `json-serialize' can return a unibyte string containing
+UTF-8 bytes for non-ASCII text, which the outer request serialization rejects.
+Decode the nested JSON bytes to text before embedding it in the request."
+  (llm-openai-responses--multibyte-string (json-serialize value)))
+
 (defun llm-openai-responses--tool-spec (tool)
   "Convert llm TOOL spec to Responses API function-tool shape."
   (let ((spec (llm-provider-utils-openai-tool-spec tool)))
@@ -745,7 +772,8 @@ missing-argument error instead of a low-level type error."
                                     (md5
                                      (format "%s"
                                              (llm-chat-prompt-tool-result-result tool-result)))))
-               :output (format "%s" (llm-chat-prompt-tool-result-result tool-result))))
+               :output (llm-openai-responses--multibyte-string
+                         (llm-chat-prompt-tool-result-result tool-result))))
        (llm-chat-prompt-interaction-tool-results interaction))
     (let ((role (symbol-name (llm-chat-prompt-interaction-role interaction)))
           (content (llm-chat-prompt-interaction-content interaction)))
@@ -758,7 +786,8 @@ missing-argument error instead of a low-level type error."
                               (format "call_%s"
                                       (md5 (llm-provider-utils-tool-use-name tool-use))))
                  :name (llm-provider-utils-tool-use-name tool-use)
-                 :arguments (json-serialize (llm-provider-utils-tool-use-args tool-use))))
+                 :arguments (llm-openai-responses--json-serialize-string
+                             (llm-provider-utils-tool-use-args tool-use))))
          content))
        ((llm-multipart-p content)
         (list
@@ -951,9 +980,10 @@ produces a valid JSON `false` literal.  `:json-false' is returned by
                 ((pred stringp) (list :type "function"
                                       :name (llm-tool-options-tool-choice options)))
                 (_ "auto")))))
-    (llm-provider-merge-non-standard-params
-     (llm-chat-prompt-non-standard-params prompt)
-     request)))
+    (llm-openai-responses--normalize-request-strings
+     (llm-provider-merge-non-standard-params
+      (llm-chat-prompt-non-standard-params prompt)
+      request))))
 
 (cl-defmethod llm-provider-chat-extract-result ((_ llm-openai-responses) response)
   "Extract final assistant text from Responses API RESPONSE."
