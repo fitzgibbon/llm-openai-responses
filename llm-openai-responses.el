@@ -836,11 +836,16 @@ Decode the nested JSON bytes to text before embedding it in the request."
   "Extract token accounting plist from streaming PAYLOAD when present."
   (when-let* ((response (or (assoc-default 'response payload) payload))
               (usage (assoc-default 'usage response)))
-    (let ((input-tokens (assoc-default 'input_tokens usage))
-          (output-tokens (assoc-default 'output_tokens usage)))
+    (let* ((input-tokens (assoc-default 'input_tokens usage))
+           (output-tokens (assoc-default 'output_tokens usage))
+           (input-details (or (assoc-default 'input_tokens_details usage)
+                              (assoc-default 'prompt_tokens_details usage)))
+           (cached-input-tokens (assoc-default 'cached_tokens input-details)))
       (append
        (when input-tokens (list :input-tokens input-tokens))
-       (when output-tokens (list :output-tokens output-tokens))))))
+       (when output-tokens (list :output-tokens output-tokens))
+       (when cached-input-tokens
+         (list :cached-input-tokens cached-input-tokens))))))
 
 (defun llm-openai-responses--stream-tool-fragment (output-index item &optional replace-arguments)
   "Build one streaming tool fragment for OUTPUT-INDEX from ITEM.
