@@ -91,11 +91,17 @@ REASONING-SUMMARY controls whether the Responses API should return
 reasoning summaries.  nil leaves provider defaults unchanged.  Non-nil
 requests a summary string mode (for example \"auto\").
 
+DEFAULT-REASONING-EFFORT is a reasoning effort string (for example
+\"none\", \"low\", \"medium\", \"high\") sent when a prompt does not
+request an effort itself.  It is passed through verbatim; which values
+are valid depends on the backend and model.  nil sends no default.
+
 When CODEX-OAUTH is non-nil, the provider talks to the Codex ChatGPT backend
 instead of the standard OpenAI API.  Tokens are acquired and refreshed via
 oauth2.el, and CODEX-ACCOUNT-ID can be used as an explicit override when the
 token response does not already contain one."
   reasoning-summary
+  default-reasoning-effort
   codex-oauth
   codex-account-id
   codex-client-id
@@ -674,13 +680,16 @@ display the auth URL instead of opening a browser automatically."
        url))))
 
 (defun llm-openai-responses--build-reasoning-request (provider prompt)
-  "Build :reasoning request payload from PROVIDER and PROMPT."
+  "Build :reasoning request payload from PROVIDER and PROMPT.
+When the prompt does not request a reasoning effort, fall back to the
+provider's DEFAULT-REASONING-EFFORT."
   (let* ((reasoning (llm-chat-prompt-reasoning prompt))
-         (effort (pcase reasoning
-                   ('light "low")
-                   ('medium "medium")
-                   ('maximum "high")
-                   (_ nil)))
+         (effort (or (pcase reasoning
+                       ('light "low")
+                       ('medium "medium")
+                       ('maximum "high")
+                       (_ nil))
+                     (llm-openai-responses-default-reasoning-effort provider)))
          (summary-mode (llm-openai-responses--coerce-string
                         (llm-openai-responses-reasoning-summary provider)))
          (payload nil))

@@ -21,6 +21,13 @@ OpenAI's Responses API endpoint (`/v1/responses`) instead of Chat Completions.
 Responses API (for example `"auto"`) to request reasoning summaries in
 provider output.
 
+`default-reasoning-effort` sets a reasoning effort (for example `"none"`,
+`"low"`, `"medium"`, `"high"`) sent whenever a prompt does not request an
+effort itself. The value is passed through verbatim; which values are valid
+depends on the backend and model — OpenAI-compatible local servers such as
+mlx-openai-server treat `"none"` as disabling thinking entirely. A prompt
+that sets `:reasoning` still takes precedence.
+
 ## Codex OAuth
 
 `llm-openai-responses` can also talk to the Codex ChatGPT backend used by the

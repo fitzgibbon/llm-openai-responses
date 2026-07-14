@@ -267,3 +267,29 @@
       (let ((thread (llm-openai-responses-codex-login-start 'provider "Test Provider" t)))
         (should (threadp thread))
         (should (eq thread llm-openai-responses-codex-login-thread))))))
+
+(ert-deftest llm-openai-responses-default-reasoning-effort-applies ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "test-model"
+                    :default-reasoning-effort "none"))
+         (prompt (llm-make-simple-chat-prompt "hello"))
+         (request (llm-provider-chat-request provider prompt nil)))
+    (should (equal (plist-get (plist-get request :reasoning) :effort) "none"))))
+
+(ert-deftest llm-openai-responses-prompt-reasoning-overrides-default-effort ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "test-model"
+                    :default-reasoning-effort "none"))
+         (prompt (llm-make-chat-prompt "hello" :reasoning 'maximum))
+         (request (llm-provider-chat-request provider prompt nil)))
+    (should (equal (plist-get (plist-get request :reasoning) :effort) "high"))))
+
+(ert-deftest llm-openai-responses-no-default-effort-sends-no-effort ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "test-model"))
+         (prompt (llm-make-simple-chat-prompt "hello"))
+         (request (llm-provider-chat-request provider prompt nil)))
+    (should-not (plist-get (plist-get request :reasoning) :effort))))
