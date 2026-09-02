@@ -44,7 +44,7 @@ official Codex tooling.
 
 When `:codex-oauth` is non-nil, the provider:
 
-- uses native oauth2.el cached login state
+- loads native oauth2.el cached login state once per Emacs session
 - refreshes the OAuth access token using the stored refresh token when needed
 - sends requests to `https://chatgpt.com/backend-api/codex/responses` by default
 

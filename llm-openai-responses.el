@@ -82,6 +82,9 @@
 (defvar llm-openai-responses-codex-login-thread nil
   "Background thread for the active Codex OAuth login flow.")
 
+(defvar llm-openai-responses--codex-oauth-token-cache (make-hash-table :test #'equal)
+  "OAuth tokens indexed by their oauth2 plstore id.")
+
 (cl-defstruct (llm-openai-responses
                (:include llm-openai-compatible
                          (url llm-openai-responses-default-api-url)))
@@ -247,7 +250,7 @@ provider's persisted session identity is unambiguous."
    (llm-openai-responses--codex-oauth-user-name provider)))
 
 (defun llm-openai-responses--oauth2-load-cached-codex-token (provider)
-  "Return cached oauth2 token for PROVIDER, or nil when unavailable."
+  "Load and return the oauth2 token for PROVIDER from plstore."
   (oauth2--with-plstore
    (let* ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider))
           (plist (cdr (plstore-get plstore plstore-id))))
@@ -270,6 +273,14 @@ provider's persisted session identity is unambiguous."
         :token-url (llm-openai-responses--codex-token-endpoint provider)
         :access-response access-response)))))
 
+(defun llm-openai-responses--cached-codex-token (provider)
+  "Return PROVIDER's cached oauth2 token, loading it from plstore if needed."
+  (let ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider)))
+    (or (gethash plstore-id llm-openai-responses--codex-oauth-token-cache)
+        (when-let ((token (llm-openai-responses--oauth2-load-cached-codex-token provider)))
+          (puthash plstore-id token llm-openai-responses--codex-oauth-token-cache)
+          token))))
+
 (defun llm-openai-responses--oauth2-token-account-id (token provider)
   "Return account id for oauth2 TOKEN and PROVIDER."
   (let* ((access-response (oauth2-token-access-response token))
@@ -282,12 +293,16 @@ provider's persisted session identity is unambiguous."
 
 (defun llm-openai-responses--oauth2-codex-auth (provider)
   "Return Codex auth plist from cached oauth2 state for PROVIDER."
-  (when-let ((token (llm-openai-responses--oauth2-load-cached-codex-token provider)))
-    (oauth2-refresh-access token (llm-openai-responses--codex-oauth-host-name provider))
-    (when-let ((account-id (llm-openai-responses--oauth2-token-account-id token provider)))
-      (let ((access-token (oauth2-token-access-token token)))
-        (unless (string-empty-p access-token)
-          (list :access-token access-token :account-id account-id))))))
+  (let ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider)))
+    (if-let* ((token (llm-openai-responses--cached-codex-token provider))
+              (token (oauth2-refresh-access
+                      token (llm-openai-responses--codex-oauth-host-name provider)))
+              (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
+        (let ((access-token (oauth2-token-access-token token)))
+          (unless (string-empty-p access-token)
+            (list :access-token access-token :account-id account-id)))
+      (remhash plstore-id llm-openai-responses--codex-oauth-token-cache)
+      nil)))
 
 (defun llm-openai-responses--random-state ()
   "Return a random OAuth state string."
@@ -433,11 +448,12 @@ secondary port when the preferred port is already in use."
 
 (defun llm-openai-responses--persist-oauth2-token (provider token)
   "Persist oauth2 TOKEN for PROVIDER and return TOKEN."
-  (setf (oauth2-token-plstore-id token)
-        (llm-openai-responses--codex-oauth-plstore-id provider))
-  (oauth2--with-plstore
-   (oauth2--update-plstore plstore token))
-  token)
+  (let ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider)))
+    (setf (oauth2-token-plstore-id token) plstore-id)
+    (oauth2--with-plstore
+     (oauth2--update-plstore plstore token))
+    (puthash plstore-id token llm-openai-responses--codex-oauth-token-cache)
+    token))
 
 (defun llm-openai-responses--run-on-main-thread (fn &rest args)
   "Run FN with ARGS back on the main Emacs thread."

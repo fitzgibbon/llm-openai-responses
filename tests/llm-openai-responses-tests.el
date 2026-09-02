@@ -63,6 +63,28 @@
     (should (string-match-p "\"stream\":true" json))
     (should (string-match-p "\"store\":false" json))))
 
+(ert-deftest llm-openai-responses-codex-auth-caches-plstore-token ()
+  (let ((llm-openai-responses--codex-oauth-token-cache
+         (make-hash-table :test #'equal))
+        (loads 0)
+        (token (make-oauth2-token :access-token "access")))
+    (cl-letf (((symbol-function 'llm-openai-responses--oauth2-load-cached-codex-token)
+               (lambda (_provider)
+                 (setq loads (1+ loads))
+                 token))
+              ((symbol-function 'oauth2-refresh-access)
+               (lambda (cached-token _host-name) cached-token))
+              ((symbol-function 'llm-openai-responses--oauth2-token-account-id)
+               (lambda (_token _provider) "acct_123")))
+      (let ((provider (make-llm-openai-responses
+                       :codex-oauth t
+                       :codex-oauth-user-name "test-user")))
+        (should (equal (llm-openai-responses--oauth2-codex-auth provider)
+                       '(:access-token "access" :account-id "acct_123")))
+        (should (equal (llm-openai-responses--oauth2-codex-auth provider)
+                       '(:access-token "access" :account-id "acct_123")))
+        (should (= loads 1))))))
+
 (ert-deftest llm-openai-responses-handle-stream-text-and-usage ()
   (let (events errors)
     (llm-openai-responses--handle-stream-event
