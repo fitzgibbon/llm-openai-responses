@@ -697,10 +697,11 @@ display the auth URL instead of opening a browser automatically."
 
 (defun llm-openai-responses--build-reasoning-request (provider prompt)
   "Build :reasoning request payload from PROVIDER and PROMPT.
-When the prompt does not request a reasoning effort, fall back to the
+When the prompt does not specify a reasoning effort, fall back to the
 provider's DEFAULT-REASONING-EFFORT."
   (let* ((reasoning (llm-chat-prompt-reasoning prompt))
          (effort (or (pcase reasoning
+                       ('none "none")
                        ('light "low")
                        ('medium "medium")
                        ('maximum "high")

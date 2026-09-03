@@ -308,6 +308,15 @@
          (request (llm-provider-chat-request provider prompt nil)))
     (should (equal (plist-get (plist-get request :reasoning) :effort) "high"))))
 
+(ert-deftest llm-openai-responses-prompt-can-disable-reasoning ()
+  (let* ((provider (make-llm-openai-responses
+                    :key (lambda () "test")
+                    :chat-model "test-model"
+                    :default-reasoning-effort "medium"))
+         (prompt (llm-make-chat-prompt "hello" :reasoning 'none))
+         (request (llm-provider-chat-request provider prompt nil)))
+    (should (equal (plist-get (plist-get request :reasoning) :effort) "none"))))
+
 (ert-deftest llm-openai-responses-no-default-effort-sends-no-effort ()
   (let* ((provider (make-llm-openai-responses
                     :key (lambda () "test")
