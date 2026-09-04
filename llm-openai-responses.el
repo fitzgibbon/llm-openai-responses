@@ -24,8 +24,10 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (require 'url)
+(require 'url-auth)
 (require 'url-http)
 (require 'browse-url)
 (require 'llm)
@@ -84,6 +86,33 @@
 
 (defvar llm-openai-responses--codex-oauth-token-cache (make-hash-table :test #'equal)
   "OAuth tokens indexed by their oauth2 plstore id.")
+
+(defvar llm-openai-responses--inhibit-url-auth-prompt nil
+  "When non-nil, url.el must not prompt for HTTP credentials.
+
+Bound around OAuth token requests.  Dynamic bindings are thread-local, so
+this stays confined to the thread running the request.")
+
+(defun llm-openai-responses--url-auth-guard (orig &rest args)
+  "Call ORIG with ARGS unless HTTP credential prompting is inhibited.
+
+The Codex token endpoint answers failures with 401 and no `WWW-Authenticate'
+header.  `url-http-handle-authentication' reads that as a Basic challenge and
+prompts for a username and password, then caches whatever was typed in
+`url-http-real-basic-auth-storage' and replays it as client credentials on
+every later request to the same host, which the endpoint rejects as
+`invalid_client'.  Returning nil instead makes url.el treat the 401 as a
+completed response, so the OAuth error body reaches the caller."
+  (unless llm-openai-responses--inhibit-url-auth-prompt
+    (apply orig args)))
+
+(advice-add 'url-get-authentication :around #'llm-openai-responses--url-auth-guard)
+
+(defmacro llm-openai-responses--without-url-auth-prompt (&rest body)
+  "Run BODY with url.el HTTP credential prompting disabled."
+  (declare (indent 0) (debug t))
+  `(let ((llm-openai-responses--inhibit-url-auth-prompt t))
+     ,@body))
 
 (cl-defstruct (llm-openai-responses
                (:include llm-openai-compatible
@@ -291,16 +320,61 @@ provider's persisted session identity is unambiguous."
         (llm-openai-responses--jwt-account-id id-token)
         (llm-openai-responses--jwt-account-id (oauth2-token-access-token token)))))
 
+(defun llm-openai-responses--live-access-token (token host-name)
+  "Return TOKEN's cached access token for HOST-NAME while it is still valid."
+  (when-let* ((request-cache (oauth2-token-request-cache token))
+              (access-token (oauth2--get-from-request-cache
+                             request-cache host-name :access-token))
+              ((not (string-empty-p access-token)))
+              (request-timestamp (oauth2--get-from-request-cache
+                                  request-cache host-name :request-timestamp))
+              (expires-in (cdr (assq 'expires_in (oauth2-token-access-response token))))
+              ((< (- (oauth2--current-timestamp) request-timestamp) expires-in)))
+    access-token))
+
+(defun llm-openai-responses--merge-access-response (old new)
+  "Return NEW merged over OLD, keeping OLD entries NEW does not replace."
+  (append new (seq-remove (lambda (entry) (assq (car entry) new)) old)))
+
+(defun llm-openai-responses--refresh-oauth2-token (provider token)
+  "Refresh TOKEN for PROVIDER and return its new access token, or nil.
+
+`oauth2-refresh-access' persists only the new access token, so the rotated
+refresh token the endpoint returns is dropped and the next refresh fails for
+good.  Merge the whole response into the token's access-response instead, which
+keeps the rotated refresh token along with entries such as `account_id' that a
+refresh does not return."
+  (when-let* ((refresh-token (oauth2-token-refresh-token token))
+              ((and (stringp refresh-token) (not (string-empty-p refresh-token))))
+              (host-name (llm-openai-responses--codex-oauth-host-name provider))
+              (request-timestamp (oauth2--current-timestamp))
+              (response (llm-openai-responses--url-response-json
+                         (llm-openai-responses--codex-token-endpoint provider)
+                         (llm-openai-responses--codex-refresh-payload
+                          provider refresh-token)))
+              (access-token (cdr (assq 'access_token response)))
+              ((and (stringp access-token) (not (string-empty-p access-token)))))
+    (setf (oauth2-token-access-token token) access-token)
+    (setf (oauth2-token-refresh-token token)
+          (or (cdr (assq 'refresh_token response)) refresh-token))
+    (setf (oauth2-token-access-response token)
+          (llm-openai-responses--merge-access-response
+           (oauth2-token-access-response token) response))
+    (setf (oauth2-token-request-cache token)
+          (oauth2--update-request-cache host-name access-token request-timestamp
+                                        (oauth2-token-request-cache token)))
+    (llm-openai-responses--persist-oauth2-token provider token)
+    access-token))
+
 (defun llm-openai-responses--oauth2-codex-auth (provider)
   "Return Codex auth plist from cached oauth2 state for PROVIDER."
-  (let ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider)))
+  (let ((plstore-id (llm-openai-responses--codex-oauth-plstore-id provider))
+        (host-name (llm-openai-responses--codex-oauth-host-name provider)))
     (if-let* ((token (llm-openai-responses--cached-codex-token provider))
-              (token (oauth2-refresh-access
-                      token (llm-openai-responses--codex-oauth-host-name provider)))
+              (access-token (or (llm-openai-responses--live-access-token token host-name)
+                                (llm-openai-responses--refresh-oauth2-token provider token)))
               (account-id (llm-openai-responses--oauth2-token-account-id token provider)))
-        (let ((access-token (oauth2-token-access-token token)))
-          (unless (string-empty-p access-token)
-            (list :access-token access-token :account-id account-id)))
+        (list :access-token access-token :account-id account-id)
       (remhash plstore-id llm-openai-responses--codex-oauth-token-cache)
       nil)))
 
@@ -511,16 +585,17 @@ or cancelling the session."
                      (llm-openai-responses--await-callback server result)))
           (unless (eq kind :code)
             (user-error "%s" value))
-          (oauth2-request-access
-           (llm-openai-responses--codex-auth-url provider)
-           (llm-openai-responses--codex-token-endpoint provider)
-           (or (llm-openai-responses-codex-client-id provider)
-               llm-openai-responses-default-codex-client-id)
-           ""
-           value
-           redirect-uri
-           (llm-openai-responses--codex-oauth-host-name provider)
-           code-verifier))
+          (llm-openai-responses--without-url-auth-prompt
+            (oauth2-request-access
+             (llm-openai-responses--codex-auth-url provider)
+             (llm-openai-responses--codex-token-endpoint provider)
+             (or (llm-openai-responses-codex-client-id provider)
+                 llm-openai-responses-default-codex-client-id)
+             ""
+             value
+             redirect-uri
+             (llm-openai-responses--codex-oauth-host-name provider)
+             code-verifier)))
       (llm-openai-responses--cancel-codex-browser-login session))))
 
 (defun llm-openai-responses--codex-refresh-payload (provider refresh-token)
@@ -537,7 +612,8 @@ or cancelling the session."
   (let ((url-request-method "POST")
         (url-request-extra-headers '(("Content-Type" . "application/json")))
         (url-request-data (encode-coding-string request-data 'utf-8)))
-    (when-let ((buffer (url-retrieve-synchronously url t t 15)))
+    (when-let ((buffer (llm-openai-responses--without-url-auth-prompt
+                         (url-retrieve-synchronously url t t 15))))
       (unwind-protect
           (with-current-buffer buffer
             (goto-char (point-min))

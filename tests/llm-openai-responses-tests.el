@@ -72,8 +72,8 @@
                (lambda (_provider)
                  (setq loads (1+ loads))
                  token))
-              ((symbol-function 'oauth2-refresh-access)
-               (lambda (cached-token _host-name) cached-token))
+              ((symbol-function 'llm-openai-responses--live-access-token)
+               (lambda (cached-token _host-name) (oauth2-token-access-token cached-token)))
               ((symbol-function 'llm-openai-responses--oauth2-token-account-id)
                (lambda (_token _provider) "acct_123")))
       (let ((provider (make-llm-openai-responses
@@ -84,6 +84,75 @@
         (should (equal (llm-openai-responses--oauth2-codex-auth provider)
                        '(:access-token "access" :account-id "acct_123")))
         (should (= loads 1))))))
+
+(ert-deftest llm-openai-responses-live-access-token-honours-expiry ()
+  (let* ((now (oauth2--current-timestamp))
+         (token (make-oauth2-token
+                 :access-response '((expires_in . 3600))
+                 :request-cache (oauth2--update-request-cache
+                                 "chatgpt.com" "access" (- now 60)))))
+    (should (equal (llm-openai-responses--live-access-token token "chatgpt.com")
+                   "access"))
+    (setf (oauth2-token-request-cache token)
+          (oauth2--update-request-cache "chatgpt.com" "access" (- now 7200)))
+    (should-not (llm-openai-responses--live-access-token token "chatgpt.com"))))
+
+(ert-deftest llm-openai-responses-refresh-persists-rotated-refresh-token ()
+  (let ((token (make-oauth2-token
+                :access-token "old-access"
+                :refresh-token "old-refresh"
+                :access-response '((refresh_token . "old-refresh")
+                                   (account_id . "acct_123")
+                                   (expires_in . 3600))))
+        (provider (make-llm-openai-responses
+                   :codex-oauth t
+                   :codex-oauth-user-name "test-user"))
+        persisted)
+    (cl-letf (((symbol-function 'llm-openai-responses--url-response-json)
+               (lambda (_url _data)
+                 '((access_token . "new-access")
+                   (refresh_token . "new-refresh")
+                   (expires_in . 3600))))
+              ((symbol-function 'llm-openai-responses--persist-oauth2-token)
+               (lambda (_provider tok) (setq persisted tok) tok)))
+      (should (equal (llm-openai-responses--refresh-oauth2-token provider token)
+                     "new-access"))
+      (should (eq persisted token))
+      (should (equal (oauth2-token-refresh-token token) "new-refresh"))
+      (let ((response (oauth2-token-access-response token)))
+        ;; The rotated refresh token replaces the old one, and entries a
+        ;; refresh does not return survive.
+        (should (equal (cdr (assq 'refresh_token response)) "new-refresh"))
+        (should (equal (cdr (assq 'account_id response)) "acct_123")))
+      (should (equal (llm-openai-responses--live-access-token token "chatgpt.com")
+                     "new-access")))))
+
+(ert-deftest llm-openai-responses-failed-refresh-keeps-stored-token ()
+  (let ((token (make-oauth2-token
+                :access-token "old-access"
+                :refresh-token "old-refresh"
+                :access-response '((refresh_token . "old-refresh")))))
+    (cl-letf (((symbol-function 'llm-openai-responses--url-response-json)
+               (lambda (_url _data) nil))
+              ((symbol-function 'llm-openai-responses--persist-oauth2-token)
+               (lambda (_provider _token) (error "Must not persist a failed refresh"))))
+      (should-not (llm-openai-responses--refresh-oauth2-token
+                   (make-llm-openai-responses :codex-oauth t
+                                              :codex-oauth-user-name "test-user")
+                   token))
+      (should (equal (oauth2-token-refresh-token token) "old-refresh")))))
+
+(ert-deftest llm-openai-responses-inhibits-url-credential-prompt ()
+  ;; `url-registered-auth-schemes' is empty until url.el is set up.
+  (url-do-setup)
+  (cl-letf (((symbol-function 'url-basic-auth)
+             (lambda (&rest _) (error "url.el must not prompt for credentials"))))
+    ;; Without the guard url.el reaches its prompting auth handler.
+    (should-error (url-get-authentication "https://auth.openai.com/oauth/token"
+                                          nil "basic" t))
+    (should-not (llm-openai-responses--without-url-auth-prompt
+                  (url-get-authentication "https://auth.openai.com/oauth/token"
+                                          nil "basic" t)))))
 
 (ert-deftest llm-openai-responses-handle-stream-text-and-usage ()
   (let (events errors)
